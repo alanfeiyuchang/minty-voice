@@ -1,0 +1,20 @@
+# Claude Code 加载插件时自动生成的类型
+.claude-plugin/types/
+# 编译出来的快捷键监听程序（setup.sh / 第一次启动时现编）
+ptt/minty-ptt
+# 打包输出、备份
+dist/
+.bak-*/
+*.bak
+*.bak-*
+# 生成猫动画的原始素材（照片、逐帧、预览），太大，也不是运行要用的
+pet/photos/
+pet/refs/
+pet/frames/
+pet/preview/
+pet/sprites/
+# 本机的语音样本
+jarvis-voice-samples/
+stt-test-audio/
+.DS_Store
+node_modules/

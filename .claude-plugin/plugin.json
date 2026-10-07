@@ -1,0 +1,158 @@
+{
+  "name": "minty",
+  "version": "0.3.0",
+  "description": "给 Claude Code 的语音助手（macOS）：点形象或按住快捷键说中英混合的话 → 本地 whisper.cpp 转写 → 整理成清晰的指令发给 Claude；回复完用语音念总结。名字、命令、形象动画都能换",
+  "author": {
+    "name": "Feiyu Chang",
+    "url": "https://github.com/alanfeiyuchang"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "name": {
+      "type": "string",
+      "title": "名字",
+      "description": "助手叫什么（面板标题、它自我介绍都用这个名字）。setup.sh 里起的名字存在 ~/.claude/minty/config.json，优先于这里",
+      "default": "MINTY"
+    },
+    "command": {
+      "type": "string",
+      "title": "命令",
+      "description": "斜杠命令的名字，只能小写英文、数字和 -，如 minty → /minty",
+      "default": "minty"
+    },
+    "uiStyle": {
+      "type": "string",
+      "title": "界面",
+      "description": "orb：旁边一个 MINTY 面板，点猫（桌面上点猫下面那行字）就开始说话、再点一下发出，MINTY 先口头应一声、Claude Code 同时开始干活；bar：输入框上方的横栏（先预览再发）",
+      "options": [
+        "orb",
+        "bar"
+      ],
+      "default": "orb"
+    },
+    "avatar": {
+      "type": "string",
+      "title": "形象",
+      "description": "面板里画哪套动画：自带的 cat，或者 ~/.claude/minty/avatars/ 里你自己做的形象包的文件夹名；orb 是光球",
+      "default": "cat"
+    },
+    "whisperModel": {
+      "type": "string",
+      "title": "Whisper 模型路径",
+      "description": "whisper.cpp 的 ggml 模型文件，~ 表示主目录",
+      "default": "~/.whisper/ggml-large-v3-turbo.bin"
+    },
+    "language": {
+      "type": "string",
+      "title": "识别语言",
+      "description": "zh 对中英混说最稳；纯英文为主可选 auto",
+      "options": [
+        "zh",
+        "auto",
+        "en"
+      ],
+      "default": "zh"
+    },
+    "refineModel": {
+      "type": "string",
+      "title": "整理指令用的模型",
+      "description": "把口语整理成专业指令、生成朗读总结时用的模型",
+      "options": [
+        "haiku",
+        "sonnet",
+        "opus"
+      ],
+      "default": "haiku"
+    },
+    "speakReplies": {
+      "type": "boolean",
+      "title": "朗读回复",
+      "description": "关闭后什么都不念：语音发起的回复、“朗读全部回复”、对话模式都不出声",
+      "default": true
+    },
+    "ttsEngine": {
+      "type": "string",
+      "title": "朗读引擎",
+      "description": "edge：微软神经网络声音，自然、中英混读好，需联网，要念的总结会发到微软的语音服务；say：macOS 自带，离线但比较机械",
+      "options": [
+        "edge",
+        "say"
+      ],
+      "default": "edge"
+    },
+    "edgeVoice": {
+      "type": "string",
+      "title": "朗读声音（edge）",
+      "description": "晓晓 Xiaoxiao 女声温和、云希 Yunxi 男声阳光、晓伊 Xiaoyi 女声活泼、云扬 Yunyang 男声播音腔",
+      "options": [
+        "zh-CN-XiaoxiaoNeural",
+        "zh-CN-YunxiNeural",
+        "zh-CN-XiaoyiNeural",
+        "zh-CN-YunyangNeural"
+      ],
+      "default": "zh-CN-XiaoxiaoNeural"
+    },
+    "speechRate": {
+      "type": "string",
+      "title": "语速（edge）",
+      "description": "相对正常语速，如 +0%、+8%、+20%、-10%",
+      "default": "+8%"
+    },
+    "voice": {
+      "type": "string",
+      "title": "朗读声音（say）",
+      "description": "macOS 系统声音名，如 Tingting（普通话）、Meijia（台湾）、Samantha（英文）；edge 不可用时也用它",
+      "default": "Tingting"
+    },
+    "vocabulary": {
+      "type": "string",
+      "title": "常用词",
+      "description": "你常说、容易被听错的英文词，逗号分隔，如 Unity, Metal, SwiftUI, Core ML, ray tracing。会提示给语音识别和整理那一步",
+      "default": ""
+    },
+    "autoSend": {
+      "type": "boolean",
+      "title": "整理完自动发送",
+      "description": "关闭时先预览，确认后再发送",
+      "default": false
+    },
+    "autoFill": {
+      "type": "boolean",
+      "title": "整理完直接放进输入框",
+      "description": "打开后跳过预览，整理好的指令直接填进输入框，改好按回车发送（“整理完自动发送”打开时以它为准）",
+      "default": false
+    },
+    "pttKey": {
+      "type": "string",
+      "title": "按住说话的键",
+      "description": "在任何 App 里按住这个键就开始录音，松开发出；按住时按了别的键（组合键）不算。第一次用会编译 ptt/minty-ptt.swift，并需要在 系统设置 → 隐私与安全性 → 输入监控 里允许 Claude",
+      "options": [
+        "right-option",
+        "right-command",
+        "right-control",
+        "fn",
+        "off"
+      ],
+      "default": "right-option"
+    },
+    "route": {
+      "type": "string",
+      "title": "什么时候发给 Claude Code",
+      "description": "auto：要它干活才发，聊天、问天气自己答；always：每句都发",
+      "options": [
+        "auto",
+        "always"
+      ],
+      "default": "auto"
+    },
+    "city": {
+      "type": "string",
+      "title": "城市",
+      "description": "问天气没说地方时查哪儿；空着按网络位置猜",
+      "default": ""
+    }
+  },
+  "homepage": "https://github.com/alanfeiyuchang/minty-voice",
+  "repository": "https://github.com/alanfeiyuchang/minty-voice",
+  "license": "MIT"
+}

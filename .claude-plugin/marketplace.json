@@ -1,0 +1,33 @@
+{
+  "name": "minty",
+  "owner": {
+    "name": "Feiyu Chang",
+    "url": "https://github.com/alanfeiyuchang"
+  },
+  "metadata": {
+    "description": "给 Claude Code 的语音助手：会听会说、有形象，名字和动画都能换"
+  },
+  "plugins": [
+    {
+      "name": "minty",
+      "source": "./",
+      "description": "给 Claude Code 的语音助手（macOS）：点形象或按住快捷键说中英混合的话 → 本地 whisper.cpp 转写 → 整理成清晰的指令发给 Claude；回复完用语音念总结。名字、命令、形象动画都能换",
+      "version": "0.3.0",
+      "author": {
+        "name": "Feiyu Chang",
+        "url": "https://github.com/alanfeiyuchang"
+      },
+      "homepage": "https://github.com/alanfeiyuchang/minty-voice",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "voice",
+        "speech",
+        "whisper",
+        "tts",
+        "desktop-pet",
+        "chinese"
+      ]
+    }
+  ]
+}
