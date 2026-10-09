@@ -1,0 +1,125 @@
+# 每次推送：在 Windows、Linux（还有 macOS）上跑插件测试，并在 Windows、Linux 上真的走一遍安装，
+# 用系统自带的语音合成念一句英文，让装好的 whisper.cpp 听写回来，确认整条链路能用。
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  plugin-tests:
+    name: 插件测试 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @anthropic-ai/claude-code
+      - run: claude --version
+      - run: claude plugin validate .
+      - run: claude plugin test .
+
+  setup-linux:
+    name: 安装流程 (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @anthropic-ai/claude-code
+      - name: setup.sh --yes
+        run: ./setup.sh --yes --name 小橘 --command xiaoju --model base
+      - name: 设置文件和插件
+        run: |
+          cat ~/.claude/minty/config.json
+          grep -q '"command": "xiaoju"' ~/.claude/minty/config.json
+          claude plugin list | grep -q "minty@minty"
+      - name: 依赖都在
+        run: |
+          command -v sox ffplay espeak-ng
+          ~/.local/bin/edge-tts --help > /dev/null
+          ls -la ~/.claude/minty/whisper/whisper-cli
+      - name: 念一句、听写回来
+        run: |
+          espeak-ng -v en -s 140 -w /tmp/say.wav "hello world, please run the tests"
+          sox /tmp/say.wav -r 16000 -c 1 -b 16 /tmp/say16.wav
+          ~/.claude/minty/whisper/whisper-cli -m ~/.whisper/ggml-base.bin -f /tmp/say16.wav -l en -nt -np | tee /tmp/out.txt
+          grep -qi "hello" /tmp/out.txt
+      - name: 快捷键监听程序能启动（CI 里没有键盘）
+        run: |
+          set +e
+          out="$(timeout 5 python3 ptt/minty-ptt-linux.py right-option ci)"; code=$?
+          echo "输出：$out（退出码 $code）"
+          case "$out" in ready*|no-permission*|unsupported*) exit 0 ;; *) exit 1 ;; esac
+      - name: 卸载
+        run: |
+          ./setup.sh --uninstall
+          ! claude plugin list | grep -q "minty@minty"
+
+  setup-windows:
+    name: 安装流程 (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @anthropic-ai/claude-code
+      - name: setup.cmd -Yes
+        shell: cmd
+        run: setup.cmd -Yes -Name Jarvis -Model base
+      - name: 设置文件和插件
+        shell: pwsh
+        run: |
+          $cfg = Get-Content -Raw "$HOME\.claude\minty\config.json" | ConvertFrom-Json
+          $cfg | Format-List
+          if ($cfg.command -ne 'jarvis') { throw "command 应该是 jarvis，实际是 $($cfg.command)" }
+          if (-not ((claude plugin list) -match 'minty@minty')) { throw '插件没装上' }
+      - name: 依赖都在
+        shell: pwsh
+        run: |
+          $sox = @("${env:ProgramFiles(x86)}\sox-14-4-2\sox.exe", "$env:ProgramFiles\sox-14-4-2\sox.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $sox) { $sox = (Get-Command sox -ErrorAction Stop).Source }
+          "sox: $sox"
+          "SOX=$sox" | Out-File -Append $env:GITHUB_ENV
+          $ffplay = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet" -Recurse -Filter ffplay.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $ffplay -and -not (Get-Command ffplay -ErrorAction SilentlyContinue)) { throw '没找到 ffplay' }
+          if (-not (Test-Path "$HOME\.local\bin\edge-tts.exe")) { throw '没找到 edge-tts' }
+          if (-not (Test-Path "$HOME\.claude\minty\whisper\whisper-cli.exe")) { throw '没找到 whisper-cli.exe' }
+      - name: 念一句、听写回来
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Speech
+          $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $fmt = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo 16000, ([System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen), ([System.Speech.AudioFormat.AudioChannel]::Mono)
+          $s.SetOutputToWaveFile("$env:TEMP\say.wav", $fmt)
+          $s.Speak('hello world, please run the tests')
+          $s.Dispose()
+          $out = & "$HOME\.claude\minty\whisper\whisper-cli.exe" -m "$HOME\.whisper\ggml-base.bin" -f "$env:TEMP\say.wav" -l en -nt -np
+          $out
+          if (-not ($out -match 'hello')) { throw '没听写出 hello' }
+      - name: sox 把 raw 转成 wav（Windows 录音停下后走的这一步）
+        shell: pwsh
+        run: |
+          & $env:SOX "$env:TEMP\say.wav" -t raw -e signed-integer -b 16 -c 1 -r 16000 "$env:TEMP\say.raw"
+          & $env:SOX -q -t raw -r 16000 -b 16 -c 1 -e signed-integer "$env:TEMP\say.raw" "$env:TEMP\back.wav"
+          if ((Get-Item "$env:TEMP\back.wav").Length -lt 10000) { throw 'raw 转 wav 失败' }
+      - name: 快捷键监听程序能启动
+        shell: pwsh
+        run: |
+          $p = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','ptt\minty-ptt.ps1','right-option','ci' -RedirectStandardOutput "$env:TEMP\ptt.txt" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 8
+          $out = Get-Content "$env:TEMP\ptt.txt" -Raw
+          "输出：$out"
+          Stop-Process $p -Force -ErrorAction SilentlyContinue
+          if (-not ($out -match 'ready')) { throw '监听程序没打出 ready' }
+      - name: 卸载
+        shell: cmd
+        run: setup.cmd -Uninstall

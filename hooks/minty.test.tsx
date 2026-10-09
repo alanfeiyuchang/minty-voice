@@ -14,6 +14,8 @@ const BAND = {
   },
 } as const
 
+// 引擎会按所在系统解析路径（Windows 上 /opt/… 会变成 C:\\opt\\…）：比较路径时统一成 / 再按结尾比
+const norm = (p: string) => p.replace(/\\/g, '/')
 const SOX = '/opt/homebrew/bin/sox'
 const PTT_BIN = '/ptt/minty-ptt'
 const PTT_OWNER = '/tmp/minty-ptt-owner'
@@ -54,7 +56,7 @@ function fakeMac(on: On, log: Log, mac: { edge?: 'ok' | 'offline' | 'missing'; h
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on)
   on('fs.exists', async ($, e) => ({
-    value: e.path.endsWith(PTT_BIN) || packFile(e.path) !== undefined || [SOX, WHISPER, MODEL, ...(edge === 'missing' ? [] : [EDGE]), ...(mac.play ? ['/opt/homebrew/bin/play'] : [])].includes(e.path) || e.path.endsWith('.wav'),
+    value: norm(e.path).endsWith(PTT_BIN) || packFile(e.path) !== undefined || [SOX, WHISPER, MODEL, ...(edge === 'missing' ? [] : [EDGE]), ...(mac.play ? ['/opt/homebrew/bin/play'] : [])].some(x => norm(e.path).endsWith(x)) || norm(e.path).endsWith('.wav'),
   }))
   // 录好的那一段有内容
   on('fs.stat', async () => ({ value: { kind: 'file' as const, size: 96_000, mtimeMs: 0, isLink: false } }))
@@ -64,6 +66,7 @@ function fakeMac(on: On, log: Log, mac: { edge?: 'ok' | 'offline' | 'missing'; h
   }
   for (const [id, pk] of Object.entries(mac.userPacks ?? {})) packs[id] = { base: '/.claude/minty/avatars', ...pk }
   function packFile(path: string): string | undefined {
+    path = norm(path)
     for (const [id, pk] of Object.entries(packs)) {
       const dir = `${pk.base}/${id}/`
       const i = path.lastIndexOf(dir)
@@ -73,24 +76,24 @@ function fakeMac(on: On, log: Log, mac: { edge?: 'ok' | 'offline' | 'missing'; h
   }
   on('fs.list', async ($, e) => {
     for (const [id, pk] of Object.entries(packs))
-      if (e.path.endsWith(`${pk.base}/${id}`)) return { value: pk.files.map(name => ({ name, kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })) }
-    const user = e.path.endsWith('/.claude/minty/avatars')
-    const ids = Object.entries(packs).filter(([, pk]) => (pk.base !== '/avatars') === user && e.path.endsWith('/avatars')).map(([id]) => id)
+      if (norm(e.path).endsWith(`${pk.base}/${id}`)) return { value: pk.files.map(name => ({ name, kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })) }
+    const user = norm(e.path).endsWith('/.claude/minty/avatars')
+    const ids = Object.entries(packs).filter(([, pk]) => (pk.base !== '/avatars') === user && norm(e.path).endsWith('/avatars')).map(([id]) => id)
     return { value: ids.map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })) }
   })
   on('fs.read', async ($, e, next) => {
-    if (e.path === PTT_OWNER && mac.pttOwner) return { value: mac.pttOwner }
-    if (e.path.endsWith('/.claude/minty/config.json') && mac.config) return { value: JSON.stringify(mac.config) }
+    if (norm(e.path).endsWith(PTT_OWNER) && mac.pttOwner) return { value: mac.pttOwner }
+    if (norm(e.path).endsWith('/.claude/minty/config.json') && mac.config) return { value: JSON.stringify(mac.config) }
     for (const [id, pk] of Object.entries(packs))
-      if (e.path.endsWith(`${pk.base}/${id}/pack.json`)) return { value: JSON.stringify({ name: pk.name, durations: { idle: 6, 'idle-yawn': 3, 'idle-groom': 3 } }) }
+      if (norm(e.path).endsWith(`${pk.base}/${id}/pack.json`)) return { value: JSON.stringify({ name: pk.name, durations: { idle: 6, 'idle-yawn': 3, 'idle-groom': 3 } }) }
     // 每个文件给一段不同的 base64，测试能分出画的是哪一段
     const f = packFile(e.path)
     if (f) return { value: { base64: { 'idle-yawn.avif': 'WWFXTg==', 'idle-groom.avif': 'R1JPTw==' }[f] ?? 'AAAA' } }
     return next(e)
   })
   on('fs.write', async ($, e, next) => {
-    if (e.path === PTT_OWNER) return { value: undefined }
-    if (e.path.endsWith('/.claude/minty/config.json')) {
+    if (norm(e.path).endsWith(PTT_OWNER)) return { value: undefined }
+    if (norm(e.path).endsWith('/.claude/minty/config.json')) {
       mac.written?.push(e.text)
       return { value: undefined }
     }
@@ -846,9 +849,9 @@ function fakeOs(on: On, log: Log, os: OsName, extra: { config?: Record<string, s
     : { HOME: '/home/me' })
   const have = os === 'windows' ? [WIN.sox, WIN.whisper, WIN.model, WIN.ffplay, WIN.edge, WIN.ps] : Object.values(LNX)
   // 在 macOS 上跑测试时，引擎把 C:\\… 当成相对路径、前面拼上当前目录：按结尾比
-  on('fs.exists', async ($, e) => ({ value: have.some(h => e.path.endsWith(h)) || e.path.endsWith('.wav') || e.path.endsWith('.raw') }))
+  on('fs.exists', async ($, e) => ({ value: have.some(h => norm(e.path).endsWith(norm(h))) || norm(e.path).endsWith('.wav') || norm(e.path).endsWith('.raw') }))
   on('fs.stat', async () => ({ value: { kind: 'file' as const, size: 96_000, mtimeMs: 0, isLink: false } }))
-  on('fs.read', async ($, e) => (e.path.endsWith('config.json') && extra.config ? { value: JSON.stringify(extra.config) } : { deny: 'no file' }))
+  on('fs.read', async ($, e) => (norm(e.path).endsWith('config.json') && extra.config ? { value: JSON.stringify(extra.config) } : { deny: 'no file' }))
   on('fs.write', async () => ({ value: undefined }))
   on('fs.list', async () => ({ value: [] }))
   on('session.messages', async () => ({ value: [] }))
