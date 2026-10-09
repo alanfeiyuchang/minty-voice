@@ -51,7 +51,7 @@ jobs:
           espeak-ng -v en -s 140 -w /tmp/say.wav "hello world, please run the tests"
           sox /tmp/say.wav -r 16000 -c 1 -b 16 /tmp/say16.wav
           ~/.claude/minty/whisper/whisper-cli -m ~/.whisper/ggml-base.bin -f /tmp/say16.wav -l en -nt -np | tee /tmp/out.txt
-          grep -qi "hello" /tmp/out.txt
+          grep -qi "run the test" /tmp/out.txt
       - name: 快捷键监听程序能启动（CI 里没有键盘）
         run: |
           set +e
@@ -104,7 +104,7 @@ jobs:
           $s.Dispose()
           $out = & "$HOME\.claude\minty\whisper\whisper-cli.exe" -m "$HOME\.whisper\ggml-base.bin" -f "$env:TEMP\say.wav" -l en -nt -np
           $out
-          if (-not ($out -match 'hello')) { throw '没听写出 hello' }
+          if (-not ($out -match 'run the test')) { throw '没听写出 run the test' }
       - name: sox 把 raw 转成 wav（Windows 录音停下后走的这一步）
         shell: pwsh
         run: |

@@ -72,10 +72,11 @@ function Refresh-Path {
   $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + (Join-Path $HOME '.local\bin')
 }
 function Has($exe) { return [bool](Get-Command $exe -ErrorAction SilentlyContinue) }
-function Winget($id, $what) {
+# 不能叫 Winget：PowerShell 不分大小写，会把 winget 命令本身盖掉、自己调自己
+function Install-WithWinget($id, $what) {
   if (-not (Has 'winget')) { Die "需要 winget 来装 $what（Windows 10 / 11 的“应用安装程序”，在 Microsoft Store 里更新它），或者自己装好 $what 再运行一次" }
   Write-Host "  用 winget 安装 $what …"
-  winget install -e --id $id --accept-package-agreements --accept-source-agreements --silent | Out-Null
+  winget.exe install -e --id $id --accept-package-agreements --accept-source-agreements --silent | Out-Null
   Refresh-Path
 }
 
@@ -144,8 +145,8 @@ if ($Avatar -eq '__make__') {
   Write-Host '  纯色背景（绿幕、蓝幕、白底）会自动抠掉；本来就透明的直接用。'
   do { $src = Ask '素材文件夹在哪？' ''; if (-not (Test-Path $src -PathType Container)) { Warn "找不到文件夹：$src" } } until (Test-Path $src -PathType Container)
   $packName = Ask '这个形象叫什么？' (Split-Path $src -Leaf)
-  if (-not (Has 'ffmpeg')) { Winget 'Gyan.FFmpeg' 'FFmpeg' }
-  if (-not (Has 'uv')) { Winget 'astral-sh.uv' 'uv' }
+  if (-not (Has 'ffmpeg')) { Install-WithWinget 'Gyan.FFmpeg' 'FFmpeg' }
+  if (-not (Has 'uv')) { Install-WithWinget 'astral-sh.uv' 'uv' }
   $out = & uv run --quiet --with 'pillow>=11.3' --with numpy --with opencv-python-headless (Join-Path $Root 'tools\make-avatar.py') $src --name $packName
   $out | ForEach-Object { Write-Host $_ }
   $made = ($out | Where-Object { $_ -like '好了：*' }) -replace '^好了：', ''
@@ -184,12 +185,12 @@ Ok "声音 $Voice，语言 $Language，模型 $ModelFile"
 Step '5/5 安装'
 Refresh-Path
 $soxDirs = @("${env:ProgramFiles(x86)}\sox-14-4-2", "$env:ProgramFiles\sox-14-4-2")
-if ((Has 'sox') -or ($soxDirs | Where-Object { Test-Path (Join-Path $_ 'sox.exe') })) { Ok 'SoX 已安装' } else { Winget 'ChrisBagwell.SoX' 'SoX（录音）' }
-if (Has 'ffplay') { Ok 'FFmpeg 已安装' } else { Winget 'Gyan.FFmpeg' 'FFmpeg（放语音）' }
+if ((Has 'sox') -or ($soxDirs | Where-Object { Test-Path (Join-Path $_ 'sox.exe') })) { Ok 'SoX 已安装' } else { Install-WithWinget 'ChrisBagwell.SoX' 'SoX（录音）' }
+if (Has 'ffplay') { Ok 'FFmpeg 已安装' } else { Install-WithWinget 'Gyan.FFmpeg' 'FFmpeg（放语音）' }
 if ($Voice -ne 'say') {
   if ((Has 'edge-tts') -or (Test-Path (Join-Path $HOME '.local\bin\edge-tts.exe'))) { Ok 'edge-tts 已安装' }
   else {
-    if (-not (Has 'uv')) { Winget 'astral-sh.uv' 'uv' }
+    if (-not (Has 'uv')) { Install-WithWinget 'astral-sh.uv' 'uv' }
     uv tool install edge-tts | Out-Null
     Ok 'edge-tts 装好了'
   }
