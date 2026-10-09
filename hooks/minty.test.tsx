@@ -812,3 +812,162 @@ test('待命动画有变化：放几遍 idle 后插播一段变化，放完一�
   expect(isVariant(await src())).toBe(false)
   await panel.unmount()
 })
+
+// ---------- Linux / Windows ----------
+// 模拟另一个系统：环境变量、程序装在哪、uname 说什么；看录音、转换、播放、朗读、快捷键监听用的命令对不对
+
+type OsName = 'linux' | 'windows'
+const WIN_HOME = 'C:\\Users\\me'
+const WIN = {
+  sox: 'C:\\Program Files (x86)\\sox-14-4-2\\sox.exe',
+  whisper: `${WIN_HOME}\\.claude\\minty\\whisper\\whisper-cli.exe`,
+  model: `${WIN_HOME}\\.whisper\\ggml-large-v3-turbo.bin`,
+  ffplay: `${WIN_HOME}\\AppData\\Local\\Microsoft\\WinGet\\Links\\ffplay.exe`,
+  edge: `${WIN_HOME}\\.local\\bin\\edge-tts.exe`,
+  ps: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+  temp: `${WIN_HOME}\\AppData\\Local\\Temp`,
+}
+const LNX = {
+  sox: '/usr/bin/sox',
+  whisper: '/home/me/.claude/minty/whisper/whisper-cli',
+  model: '/home/me/.whisper/ggml-large-v3-turbo.bin',
+  ffplay: '/usr/bin/ffplay',
+  edge: '/home/me/.local/bin/edge-tts',
+  py: '/usr/bin/python3',
+  espeak: '/usr/bin/espeak-ng',
+}
+
+function fakeOs(on: On, log: Log, os: OsName, extra: { config?: Record<string, string | boolean>; pttLines?: string[] } = {}) {
+  emptyBand(on)
+  const clock = mock.clock(on, { now: 1000 })
+  mock.store(on)
+  mock.env(on, os === 'windows'
+    ? { OS: 'Windows_NT', USERPROFILE: WIN_HOME, TEMP: WIN.temp, LOCALAPPDATA: `${WIN_HOME}\\AppData\\Local`, SystemRoot: 'C:\\Windows' }
+    : { HOME: '/home/me' })
+  const have = os === 'windows' ? [WIN.sox, WIN.whisper, WIN.model, WIN.ffplay, WIN.edge, WIN.ps] : Object.values(LNX)
+  // 在 macOS 上跑测试时，引擎把 C:\\… 当成相对路径、前面拼上当前目录：按结尾比
+  on('fs.exists', async ($, e) => ({ value: have.some(h => e.path.endsWith(h)) || e.path.endsWith('.wav') || e.path.endsWith('.raw') }))
+  on('fs.stat', async () => ({ value: { kind: 'file' as const, size: 96_000, mtimeMs: 0, isLink: false } }))
+  on('fs.read', async ($, e) => (e.path.endsWith('config.json') && extra.config ? { value: JSON.stringify(extra.config) } : { deny: 'no file' }))
+  on('fs.write', async () => ({ value: undefined }))
+  on('fs.list', async () => ({ value: [] }))
+  on('session.messages', async () => ({ value: [] }))
+  on('process.run', async ($, e) => {
+    log.runs.push([...e.argv])
+    const stdout = e.argv[0] === 'uname' ? 'Linux\n' : e.argv[0] === WIN.whisper || e.argv[0] === LNX.whisper ? '帮我跑一下测试\n' : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('process.spawn', async function* ($, e) {
+    log.spawns.push({ argv: e.argv, input: e.input })
+    if (String(e.argv.at(-3) ?? '').includes('minty-ptt') || e.argv.some(a => String(a).includes('minty-ptt'))) {
+      for (const l of extra.pttLines ?? ['ready']) yield { stream: 'stdout' as const, text: l + '\n' }
+    }
+    return { value: { code: 0, signal: null } }
+  })
+  on('model.complete', async ($, e) => {
+    log.models.push({ system: e.system ?? '', prompt: e.prompt })
+    const sys = e.system ?? ''
+    const text = sys.includes('判断这句话该怎么处理')
+      ? JSON.stringify({ route: 'task', say: '好。', task: '帮我跑一下测试' })
+      : sys.includes('语音合成') ? '好了，测试都过了。' : '运行测试。'
+    return { value: { isAnswered: true, text, usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }
+  })
+  on('turn.complete', async ($, e) => ({ text: e.answer }))
+  return { clock }
+}
+
+async function talkOnPanel($: Engine, sent: string[]) {
+  const panel = await $.ui.mount({ plugin: 'minty', surface: 'desktop', ...PANEL })
+  await panel.press({ key: 'panel-talk' })
+  await until(() => sent.length > 0)
+  await panel.unmount()
+}
+
+test('Windows：录成 raw 再用 sox 转 wav（不用 pkill）、ffplay 放语音、PowerShell 删临时文件', async ($, on) => {
+  const log = newLog()
+  fakeOs(on, log, 'windows')
+  const sent: string[] = []
+  on('prompt.submit', async ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  await talkOnPanel($, sent)
+  const rec = log.spawns.find(s => s.argv[0] === WIN.sox)!
+  expect(rec.argv).toContain('raw')
+  const rawFile = String(rec.argv.find(a => String(a).endsWith('.raw')))
+  expect(rawFile.startsWith(WIN.temp + '\\minty-')).toBe(true)
+  // 停下后转成 wav，whisper 读的是 wav
+  const conv = log.runs.find(a => a[0] === WIN.sox)!
+  expect(conv.slice(1, 3)).toEqual(['-q', '-t'])
+  expect(conv).toContain(rawFile)
+  const wav = rawFile.replace(/\.raw$/, '.wav')
+  expect(conv.at(-1)).toBe(wav)
+  expect(log.runs.find(a => a[0] === WIN.whisper)).toContain(wav)
+  expect(log.runs.some(a => String(a[0]).includes('pkill'))).toBe(false)
+  // 临时文件用 PowerShell 删
+  expect(log.runs.some(a => a[0] === WIN.ps && a.some(x => x.includes('Remove-Item')))).toBe(true)
+  // 快脑的应答：edge-tts 合成，ffplay 放
+  await until(() => log.spawns.some(s => s.argv[0] === WIN.ffplay))
+  expect(log.spawns.find(s => s.argv[0] === WIN.ffplay)?.argv.slice(1, 3)).toEqual(['-nodisp', '-autoexit'])
+})
+
+test('Windows：没有 edge 时用系统自带的 System.Speech 朗读', async ($, on) => {
+  const log = newLog()
+  fakeOs(on, log, 'windows', { config: { ttsEngine: 'say' } })
+  const sent: string[] = []
+  on('prompt.submit', async ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true } }))
+  sessionStart(on)
+  await startSession($)
+  await talkOnPanel($, sent)
+  await until(() => log.spawns.some(s => s.argv[0] === WIN.ps && String(s.argv.at(-1)).includes('System.Speech')))
+  const sp = log.spawns.find(s => s.argv[0] === WIN.ps && String(s.argv.at(-1)).includes('System.Speech'))!
+  expect(sp.input).toBe('好。')
+})
+
+test('Windows：快捷键监听是 PowerShell 脚本，设置里的键叫“右 Alt”', async ($, on) => {
+  const log = newLog()
+  fakeOs(on, log, 'windows', { pttLines: ['ready'] })
+  on('ui.open', async () => ({ value: { isPlaced: true } }))
+  sessionStart(on)
+  await startSession($)
+  await until(() => log.spawns.some(s => s.argv.includes('-File')))
+  const ptt = log.spawns.find(s => s.argv.includes('-File'))!
+  expect(ptt.argv[0]).toBe(WIN.ps)
+  expect(String(ptt.argv[ptt.argv.indexOf('-File') + 1]).endsWith('\\ptt\\minty-ptt.ps1')).toBe(true)
+  expect(ptt.argv.slice(-2)).toEqual(['right-option', 'this-session'])
+  const pane = await $.ui.mount({ plugin: 'minty', surface: 'desktop', ...SETTINGS })
+  const sel = await pane.find({ key: 'set-pttKey' })
+  expect(((sel?.props as { options?: { label: string }[] }).options ?? []).map(o => o.label)).toEqual(['右 Alt', '右 Win', '右 Ctrl', '关'])
+  await pane.unmount()
+})
+
+test('Linux：录 wav、pkill 收尾、ffplay 放语音；快捷键是 python3 脚本，没权限时提示加 input 组', async ($, on) => {
+  const log = newLog()
+  fakeOs(on, log, 'linux', { pttLines: ['no-permission'] })
+  const sent: string[] = []
+  on('prompt.submit', async ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  const toasts: string[] = []
+  on('ui.toast', async ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true } }))
+  sessionStart(on)
+  await startSession($)
+  await until(() => toasts.length > 0)
+  const ptt = log.spawns.find(s => s.argv[0] === LNX.py)!
+  expect(String(ptt.argv[1]).endsWith('/ptt/minty-ptt-linux.py')).toBe(true)
+  expect(toasts[0]).toContain('input')
+  await talkOnPanel($, sent)
+  const rec = log.spawns.find(s => s.argv[0] === LNX.sox)!
+  expect(String(rec.argv[9]).startsWith('/tmp/minty-') && String(rec.argv[9]).endsWith('.wav')).toBe(true)
+  expect(log.runs.some(a => a[0] === '/usr/bin/pkill' && a[1] === '-INT')).toBe(true)
+  await until(() => log.spawns.some(s => s.argv[0] === LNX.ffplay))
+})

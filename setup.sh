@@ -1,10 +1,11 @@
 #!/bin/bash
-# 语音助手一键安装（macOS）：起名字 → 选形象 → 选快捷键和声音 → 装依赖 → 接进 Claude Code
+# 语音助手一键安装（macOS / Linux；Windows 用 setup.cmd）：起名字 → 选形象 → 选快捷键和声音 → 装依赖 → 接进 Claude Code
 #
 #   ./setup.sh                 一问一答地装（再跑一次就是改设置：名字、形象…）
 #   ./setup.sh --yes           全用默认值，不问
 #   ./setup.sh --name 小橘 --command xiaoju --avatar cat --key right-option --model turbo --yes
 #   ./setup.sh --uninstall     从 Claude Code 里卸掉（设置和自己做的形象留在 ~/.claude/minty）
+#   ./setup.sh --no-system-packages   不用 sudo 装系统软件包（Linux；缺什么会列出来，自己装）
 #
 # 设置写在 ~/.claude/minty/config.json，之后在面板的“⚙ 设置”里改也是改它。
 set -e
@@ -29,12 +30,13 @@ warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
 die() { printf '\n\033[31m✗ %s\033[0m\n' "$1"; exit 1; }
 
 # ---------- 参数 ----------
-YES=0; UNINSTALL=0
+YES=0; UNINSTALL=0; NO_PKGS=0
 NAME=""; COMMAND=""; AVATAR=""; KEY=""; MODEL=""; VOICE=""; LANG_CHOICE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y) YES=1 ;;
     --uninstall) UNINSTALL=1 ;;
+    --no-system-packages) NO_PKGS=1 ;;
     --name) NAME="$2"; shift ;;
     --command) COMMAND="$2"; shift ;;
     --avatar) AVATAR="$2"; shift ;;
@@ -42,13 +44,18 @@ while [ $# -gt 0 ]; do
     --model) MODEL="$2"; shift ;;
     --voice) VOICE="$2"; shift ;;
     --language) LANG_CHOICE="$2"; shift ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) die "不认识的参数：$1（./setup.sh --help 看用法）" ;;
   esac
   shift
 done
 
-[ "$(uname -s)" = Darwin ] || die "目前只支持 macOS（录音用 sox、朗读用 afplay/say、快捷键用 macOS 的事件监听）"
+case "$(uname -s)" in
+  Darwin) OS=mac ;;
+  Linux) OS=linux ;;
+  MINGW*|MSYS*|CYGWIN*) die "Windows 上请双击或在命令行运行 setup.cmd" ;;
+  *) die "不支持这个系统：$(uname -s)（支持 macOS、Linux、Windows）" ;;
+esac
 
 # 问一句，回车用默认值；--yes 时直接用默认值
 ask() { # ask <提示> <默认值> → $REPLY
@@ -72,13 +79,107 @@ choose() {
   done
 }
 
-# python3 用来读写 JSON；没有命令行工具时 /usr/bin/python3 会弹安装框
+# ---------- 系统软件包（Linux） ----------
+PM=""
+for m in apt-get dnf pacman zypper; do command -v $m >/dev/null 2>&1 && { PM=$m; break; }; done
+SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+# pkgs <通用名…> → 按包管理器换成真正的包名
+pkgs() {
+  local out=()
+  for x in "$@"; do
+    case "$PM:$x" in
+      apt-get:sox) out+=(sox libsox-fmt-all) ;;
+      apt-get:build) out+=(git cmake g++ make) ;;
+      dnf:build) out+=(git cmake gcc-c++ make) ;;
+      pacman:build) out+=(git cmake gcc make) ;;
+      zypper:build) out+=(git cmake gcc-c++ make) ;;
+      *:python3) [ "$PM" = pacman ] && out+=(python) || out+=(python3) ;;
+      *) out+=("$x") ;;
+    esac
+  done
+  echo "${out[@]}"
+}
+# need_pkgs <通用名…>：缺的用包管理器装（要 sudo）；--no-system-packages 时只列出来
+need_pkgs() {
+  [ $# -gt 0 ] || return 0
+  local list; list="$(pkgs "$@")"
+  if [ "$NO_PKGS" = 1 ] || [ -z "$PM" ]; then
+    warn "要装这些系统软件包：$list（--no-system-packages 或没认出包管理器，跳过；请自己装好）"
+    return 0
+  fi
+  echo "  要装：$list（用 $PM，会问 sudo 密码）"
+  case "$PM" in
+    apt-get) $SUDO apt-get update -qq && $SUDO apt-get install -y $list ;;
+    dnf) $SUDO dnf install -y $list ;;
+    pacman) $SUDO pacman -S --needed --noconfirm $list ;;
+    zypper) $SUDO zypper install -y $list ;;
+  esac
+}
+
+# python3 用来读写 JSON；macOS 没有命令行工具时 /usr/bin/python3 会弹安装框
+PY=python3
 need_clt() {
+  if [ "$OS" = linux ]; then
+    command -v python3 >/dev/null 2>&1 || need_pkgs python3
+    command -v python3 >/dev/null 2>&1 || die "需要 python3"
+    return
+  fi
+  PY=/usr/bin/python3
   if ! xcode-select -p >/dev/null 2>&1; then
     warn "需要 Xcode 命令行工具（python3、swiftc 都在里面）。弹出的窗口里点“安装”，装完再运行一次 ./setup.sh"
     xcode-select --install >/dev/null 2>&1 || true
     exit 1
   fi
+}
+
+# uv：装 edge-tts、跑做形象的工具都用它
+need_uv() {
+  command -v uv >/dev/null 2>&1 || [ -x "$HOME/.local/bin/uv" ] && return 0
+  if command -v brew >/dev/null 2>&1; then brew install uv
+  else
+    echo "  安装 uv（Python 工具管理器，装到 ~/.local/bin）…"
+    curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
+  fi
+}
+UV() { command -v uv >/dev/null 2>&1 && uv "$@" || "$HOME/.local/bin/uv" "$@"; }
+
+# ---------- whisper.cpp（Linux） ----------
+# 优先 GitHub 上 whisper.cpp 官方的预编译包（x86_64 / aarch64），解压到 ~/.claude/minty/whisper；
+# 跑不起来（比如系统太老）就从源码编一个静态的
+install_whisper_linux() {
+  local dest="$DATA_DIR/whisper"
+  if command -v whisper-cli >/dev/null 2>&1; then ok "whisper.cpp 已安装（$(command -v whisper-cli)）"; return; fi
+  if [ -x "$dest/whisper-cli" ] && "$dest/whisper-cli" --help >/dev/null 2>&1; then ok "whisper.cpp 已在 $dest"; return; fi
+  if command -v brew >/dev/null 2>&1; then brew install whisper-cpp && return; fi
+  local arch asset url tmp
+  case "$(uname -m)" in x86_64) arch=x64 ;; aarch64|arm64) arch=arm64 ;; *) arch="" ;; esac
+  if [ -n "$arch" ]; then
+    asset="whisper-bin-ubuntu-$arch.tar.gz"
+    url="$(curl -fsSL "https://api.github.com/repos/ggml-org/whisper.cpp/releases?per_page=20" | $PY -c '
+import json, sys
+for r in json.load(sys.stdin):
+    for a in r.get("assets", []):
+        if a["name"] == sys.argv[1]:
+            print(a["browser_download_url"]); sys.exit()' "$asset" 2>/dev/null || true)"
+    if [ -n "$url" ]; then
+      echo "  下载 whisper.cpp 预编译包（$asset）…"
+      tmp="$(mktemp -d)"
+      if curl -fL --progress-bar -o "$tmp/w.tar.gz" "$url" && tar xzf "$tmp/w.tar.gz" -C "$tmp"; then
+        rm -rf "$dest"; mkdir -p "$dest"
+        cp -a "$tmp"/whisper-bin-*/. "$dest/"
+        rm -rf "$tmp"
+        if "$dest/whisper-cli" --help >/dev/null 2>&1; then ok "whisper.cpp 装在了 $dest"; return; fi
+        warn "预编译包在这台机器上跑不起来，改成从源码编"
+      fi
+    fi
+  fi
+  command -v cmake >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1 || need_pkgs build
+  local src="$DATA_DIR/whisper.cpp"
+  [ -d "$src/.git" ] || git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$src"
+  cmake -S "$src" -B "$src/build" -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release >/dev/null
+  cmake --build "$src/build" -j --config Release --target whisper-cli >/dev/null
+  mkdir -p "$dest" && cp "$src/build/bin/whisper-cli" "$dest/"
+  ok "whisper.cpp 编好了，装在 $dest"
 }
 
 # ---------- 卸载 ----------
@@ -90,7 +191,7 @@ if [ "$UNINSTALL" = 1 ]; then
   fi
   if [ -f "$SETTINGS" ] && grep -q "$PLUGIN_DIR" "$SETTINGS"; then
     need_clt
-    /usr/bin/python3 - "$SETTINGS" "$PLUGIN_DIR" <<'PY'
+    $PY - "$SETTINGS" "$PLUGIN_DIR" <<'PY'
 import json, sys
 path, mod = sys.argv[1:3]
 data = json.load(open(path))
@@ -109,7 +210,7 @@ fi
 need_clt
 
 # 读已有设置（再跑一次 setup 时用它当默认值）
-cfg_get() { /usr/bin/python3 -c 'import json,sys
+cfg_get() { $PY -c 'import json,sys
 try: print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))
 except Exception: print("")' "$CONFIG" "$1"; }
 
@@ -145,7 +246,7 @@ for base in "$PLUGIN_DIR/avatars" "$DATA_DIR/avatars"; do
   for d in "$base"/*/; do
     [ -f "$d/idle.avif" ] || [ -f "$d/idle.webp" ] || [ -f "$d/idle.gif" ] || [ -f "$d/idle.png" ] || [ -f "$d/idle.svg" ] || continue
     id="$(basename "$d")"
-    label="$(/usr/bin/python3 -c 'import json,sys
+    label="$($PY -c 'import json,sys
 try: print(json.load(open(sys.argv[1])).get("name") or sys.argv[2])
 except Exception: print(sys.argv[2])' "$d/pack.json" "$id")"
     IDS+=("$id"); LABELS+=("$label（$id）")
@@ -173,10 +274,10 @@ EOF
     warn "找不到文件夹：$REPLY"
   done
   ask "这个形象叫什么？" "$(basename "$SRC")"; PACK_NAME="$REPLY"
-  for pkg in ffmpeg libavif uv; do
-    bin=$pkg; [ $pkg = libavif ] && bin=avifenc
-    command -v $bin >/dev/null 2>&1 || { command -v brew >/dev/null 2>&1 || die "需要 Homebrew：https://brew.sh"; brew install $pkg; }
-  done
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    if [ "$OS" = mac ]; then command -v brew >/dev/null 2>&1 || die "需要 Homebrew：https://brew.sh"; brew install ffmpeg; else need_pkgs ffmpeg; fi
+  fi
+  need_uv
   OUT="$("$ROOT/tools/make-avatar.sh" "$SRC" --name "$PACK_NAME" | tee /dev/stderr | sed -n 's/^好了：//p')"
   [ -n "$OUT" ] || die "形象没做出来，看上面的报错"
   AVATAR="$(basename "$OUT")"
@@ -185,11 +286,16 @@ ok "形象 $AVATAR"
 
 # ---------- 3. 快捷键 ----------
 step "3/5 按住说话的键"
-KEYS=(right-option right-command right-control fn off)
+if [ "$OS" = mac ]; then
+  KEYS=(right-option right-command right-control fn off)
+  KEY_LABELS=("右 Option（推荐，几乎不和别的快捷键冲突）" "右 Command" "右 Control" "Fn / 🌐（要先在系统设置→键盘里把“按下 🌐 键时”改成“无操作”）" "不要快捷键，只点形象")
+else
+  KEYS=(right-option right-command right-control off)
+  KEY_LABELS=("右 Alt（推荐）" "右 Super" "右 Ctrl" "不要快捷键，只点形象")
+fi
 if [ -z "$KEY" ]; then
   cur="$(cfg_get pttKey)"; def=1; for i in "${!KEYS[@]}"; do [ "${KEYS[$i]}" = "$cur" ] && def=$((i + 1)); done
-  choose "在任何 App 里按住它就开始录音，松开发出（只监听不拦截，键照常能用）：" "$def" \
-    "右 Option（推荐，几乎不和别的快捷键冲突）" "右 Command" "右 Control" "Fn / 🌐（要先在系统设置→键盘里把“按下 🌐 键时”改成“无操作”）" "不要快捷键，只点形象"
+  choose "在任何程序里按住它就开始录音，松开发出（只监听不拦截，键照常能用）：" "$def" "${KEY_LABELS[@]}"
   KEY="${KEYS[$((REPLY - 1))]}"
 fi
 case " ${KEYS[*]} " in *" $KEY "*) ;; *) die "--key 只能是 ${KEYS[*]}" ;; esac
@@ -202,7 +308,7 @@ if [ -z "$VOICE" ]; then
   cur="$(cfg_get edgeVoice)"; [ "$(cfg_get ttsEngine)" = say ] && cur=say
   def=1; for i in "${!VOICES[@]}"; do [ "${VOICES[$i]}" = "$cur" ] && def=$((i + 1)); done
   choose "它用什么声音说话？（前四个是微软的神经网络声音，需联网，念的话会发到微软语音服务）" "$def" \
-    "晓晓 · 女声温和" "云希 · 男声阳光" "晓伊 · 女声活泼" "云扬 · 男声播音腔" "macOS 自带的 say（离线，比较机械）"
+    "晓晓 · 女声温和" "云希 · 男声阳光" "晓伊 · 女声活泼" "云扬 · 男声播音腔" "系统自带的朗读（离线，比较机械）"
   VOICE="${VOICES[$((REPLY - 1))]}"
 fi
 LANGS=(zh auto en)
@@ -226,15 +332,25 @@ ok "声音 $VOICE，语言 $LANG_CHOICE，模型 $MODEL_FILE"
 
 # ---------- 5. 安装 ----------
 step "5/5 安装"
-command -v brew >/dev/null 2>&1 || die "需要 Homebrew：先按 https://brew.sh 装好，再运行一次 ./setup.sh"
-for pkg in sox whisper-cpp; do
-  if brew list --formula "$pkg" >/dev/null 2>&1; then ok "$pkg 已安装"; else brew install "$pkg"; fi
-done
+if [ "$OS" = mac ]; then
+  command -v brew >/dev/null 2>&1 || die "需要 Homebrew：先按 https://brew.sh 装好，再运行一次 ./setup.sh"
+  for pkg in sox whisper-cpp; do
+    if brew list --formula "$pkg" >/dev/null 2>&1; then ok "$pkg 已安装"; else brew install "$pkg"; fi
+  done
+else
+  missing=()
+  command -v sox >/dev/null 2>&1 || missing+=(sox)
+  command -v ffplay >/dev/null 2>&1 || missing+=(ffmpeg)       # 放语音
+  command -v espeak-ng >/dev/null 2>&1 || missing+=(espeak-ng) # 断网时的备用朗读
+  command -v curl >/dev/null 2>&1 || missing+=(curl)
+  if [ ${#missing[@]} = 0 ]; then ok "sox、ffmpeg、espeak-ng 已安装"; else need_pkgs "${missing[@]}"; fi
+  install_whisper_linux
+fi
 if [ "$VOICE" != say ]; then
   if command -v edge-tts >/dev/null 2>&1 || [ -x "$HOME/.local/bin/edge-tts" ]; then ok "edge-tts 已安装"
   else
-    command -v uv >/dev/null 2>&1 || brew install uv
-    uv tool install edge-tts
+    need_uv
+    UV tool install edge-tts
   fi
 fi
 
@@ -247,14 +363,29 @@ else
     && mv "$MODEL_DIR/$MODEL_FILE.part" "$MODEL_DIR/$MODEL_FILE"
 fi
 
-if [ "$KEY" != off ]; then
+if [ "$KEY" != off ] && [ "$OS" = mac ]; then
   if swiftc -O "$PLUGIN_DIR/ptt/minty-ptt.swift" -o "$PLUGIN_DIR/ptt/minty-ptt" 2>/dev/null; then ok "快捷键监听程序编好了"
   else warn "快捷键监听程序没编出来；之后它第一次启动时会再试"; fi
+fi
+# Linux 的快捷键直接读 /dev/input，要在 input 组里。这会让你以自己身份运行的所有程序都能读键盘，所以先问
+INPUT_GROUP_PENDING=0
+if [ "$KEY" != off ] && [ "$OS" = linux ]; then
+  if id -nG | tr ' ' '\n' | grep -qx input; then ok "你在 input 组里，快捷键能用"
+  elif [ "$YES" = 1 ]; then
+    warn "快捷键要读键盘，你还不在 input 组里：sudo usermod -aG input \$USER，然后注销重新登录"
+    INPUT_GROUP_PENDING=1
+  else
+    ask "快捷键要读键盘，得把你加进 input 组（要 sudo；之后你运行的程序都能读键盘输入）。现在加吗？[y/N]" "n"
+    case "$REPLY" in
+      y|Y|yes) $SUDO usermod -aG input "$USER" && ok "加好了，注销重新登录后生效"; INPUT_GROUP_PENDING=1 ;;
+      *) warn "没加。想用快捷键时运行：sudo usermod -aG input \$USER，然后注销重新登录"; INPUT_GROUP_PENDING=1 ;;
+    esac
+  fi
 fi
 
 # 写设置：只改这次问到的项，别的（面板里改过的）留着
 mkdir -p "$DATA_DIR/avatars"
-/usr/bin/python3 - "$CONFIG" "$NAME" "$COMMAND" "$AVATAR" "$KEY" "$VOICE" "$LANG_CHOICE" "$MODEL_DIR/$MODEL_FILE" <<'PY'
+$PY - "$CONFIG" "$NAME" "$COMMAND" "$AVATAR" "$KEY" "$VOICE" "$LANG_CHOICE" "$MODEL_DIR/$MODEL_FILE" <<'PY'
 import json, os, sys
 path, name, command, avatar, key, voice, lang, model = sys.argv[1:]
 cfg = {}
@@ -270,7 +401,7 @@ ok "设置写进了 $CONFIG"
 
 # 同一台机器上已经从别的文件夹加载了这个插件（比如开发目录）：再装一份会加载两遍
 if [ -f "$SETTINGS" ]; then
-  OTHER="$(/usr/bin/python3 - "$SETTINGS" "$PLUGIN_DIR" <<'PY'
+  OTHER="$($PY - "$SETTINGS" "$PLUGIN_DIR" <<'PY'
 import json, os, sys
 try: dirs = json.load(open(sys.argv[1])).get("env", {}).get("CLAUDE_CODE_PLUGIN_DIRS", "").split(":")
 except Exception: dirs = []
@@ -298,7 +429,7 @@ elif command -v claude >/dev/null 2>&1 && [ -f "$ROOT/.claude-plugin/marketplace
 else
   mkdir -p "$HOME/.claude"
   [ -f "$SETTINGS" ] && cp "$SETTINGS" "$SETTINGS.bak-voice"
-  /usr/bin/python3 - "$SETTINGS" "$PLUGIN_DIR" <<'PY'
+  $PY - "$SETTINGS" "$PLUGIN_DIR" <<'PY'
 import json, os, sys
 path, mod = sys.argv[1:3]
 data = json.load(open(path)) if os.path.exists(path) and os.path.getsize(path) else {}
@@ -317,21 +448,25 @@ if [ "$YES" != 1 ]; then
   EDGE="$(command -v edge-tts || echo "$HOME/.local/bin/edge-tts")"
   TMP="${TMPDIR:-/tmp}/voice-setup-$$.mp3"
   if [ "$VOICE" != say ] && [ -x "$EDGE" ] && "$EDGE" --voice="$VOICE" --text="$HELLO" --write-media="$TMP" >/dev/null 2>&1; then
-    afplay "$TMP"; rm -f "$TMP"
-  else
-    say "$HELLO" 2>/dev/null || true
+    if [ "$OS" = mac ]; then afplay "$TMP"; else ffplay -nodisp -autoexit -loglevel quiet "$TMP" 2>/dev/null || true; fi
+    rm -f "$TMP"
+  elif [ "$OS" = mac ]; then say "$HELLO" 2>/dev/null || true
+  else espeak-ng -v cmn "$HELLO" 2>/dev/null || true
   fi
 fi
 
-cat <<EOF
-
-$(bold "✅ 装好了。")
-  1. 重启 Claude Code（终端里重新运行 claude；桌面版重开 Code 标签页）。
-     对话旁边会出现 $NAME 的面板。窗口太窄放不下时，输入 /$COMMAND panel 打开。
-  2. 输入 /$COMMAND check 确认依赖都是 ✓。
-  3. 第一次录音 macOS 会要麦克风权限，点“允许”。
-$( [ "$KEY" != off ] && echo "  4. 按住快捷键没反应：系统设置 → 隐私与安全性 → 输入监控，打开 Claude（或你用的终端），再重启它。" )
-
-  想换名字、形象、声音：再运行一次 ./setup.sh，或者在面板里点“⚙ 设置”。
-  做自己的形象：./tools/make-avatar.sh <素材文件夹> --name "名字"（说明见 README）。
-EOF
+echo
+bold "✅ 装好了。"; echo
+echo "  1. 重启 Claude Code（终端里重新运行 claude；桌面版重开 Code 标签页）。"
+echo "     对话旁边会出现 $NAME 的面板。窗口太窄放不下时，输入 /$COMMAND panel 打开。"
+echo "  2. 输入 /$COMMAND check 确认依赖都是 ✓。"
+if [ "$OS" = mac ]; then
+  echo "  3. 第一次录音 macOS 会要麦克风权限，点“允许”。"
+  [ "$KEY" = off ] || echo "  4. 按住快捷键没反应：系统设置 → 隐私与安全性 → 输入监控，打开 Claude（或你用的终端），再重启它。"
+else
+  echo "  3. 录不到声音：检查系统设置里的默认输入设备（PulseAudio / PipeWire）。"
+  [ "$INPUT_GROUP_PENDING" = 1 ] && echo "  4. 快捷键要等你在 input 组里、注销重新登录之后才能用。"
+fi
+echo
+echo "  想换名字、形象、声音：再运行一次 ./setup.sh，或者在面板里点“⚙ 设置”。"
+echo "  做自己的形象：./tools/make-avatar.sh <素材文件夹> --name \"名字\"（说明见 README）。"

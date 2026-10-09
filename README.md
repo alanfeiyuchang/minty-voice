@@ -1,4 +1,4 @@
-# 给 Claude Code 的语音助手（macOS）
+# 给 Claude Code 的语音助手（macOS / Windows / Linux）
 
 一个会听、会说、有形象的助手，住在 Claude Code 对话旁边的面板里。**名字、命令、形象动画都由你定**，默认叫 MINTY、是一只猫。
 
@@ -10,16 +10,32 @@
    - 聊天、问它看法、问 Claude 做得怎么样、问天气 → **它自己用口语回答，不往 Claude Code 里发**
 3. Claude 做完，把回复**总结成一两句话念给你听**
 
-需要：macOS、[Homebrew](https://brew.sh)、Claude Code **v2.1.287 或更新**（终端版或桌面版都行）。
+需要 Claude Code **v2.1.287 或更新**（终端版或桌面版都行），以及：
+
+| 系统 | 需要 | 安装时自动装的 |
+| --- | --- | --- |
+| macOS | [Homebrew](https://brew.sh)、Xcode 命令行工具 | sox、whisper.cpp（brew）、edge-tts |
+| Windows 10 / 11 | winget（系统自带的“应用安装程序”） | SoX、FFmpeg、uv（winget），whisper.cpp 官方预编译包、edge-tts |
+| Linux | apt / dnf / pacman / zypper 之一，python3 | sox、ffmpeg、espeak-ng（包管理器，要 sudo），whisper.cpp 官方预编译包（x86_64 / arm64；别的架构自动从源码编）、edge-tts |
 
 ---
 
 ## 安装
 
+**macOS / Linux**：
+
 ```bash
 git clone https://github.com/alanfeiyuchang/minty-voice.git
 cd minty-voice
 ./setup.sh
+```
+
+**Windows**：下载（或 `git clone`）这个仓库，双击 **`setup.cmd`**，或者在命令行里：
+
+```bat
+git clone https://github.com/alanfeiyuchang/minty-voice.git
+cd minty-voice
+setup.cmd
 ```
 
 （也可以在 [Releases](https://github.com/alanfeiyuchang/minty-voice/releases) 下载 zip，解压后运行 `./setup.sh`。装完别删这个文件夹，Claude Code 直接从这里加载它。）
@@ -34,25 +50,30 @@ cd minty-voice
 
 装完重启 Claude Code，对话旁边就会出现它的面板。输入 `/<你起的命令> check` 确认依赖都是 ✓。
 
-不想回答问题：`./setup.sh --yes` 全用默认值；也可以直接给参数：
+不想回答问题：`./setup.sh --yes` 全用默认值；也可以直接给参数（Windows 是 `setup.cmd -Yes -Name 小橘 …`）：
 
 ```bash
 ./setup.sh --name 小橘 --command xiaoju --avatar cat --key right-option --model turbo --yes
 ```
 
-**想改名字、换形象、换声音**：再运行一次 `./setup.sh`，或者在面板里点“⚙ 设置”。
-**卸载**：`./setup.sh --uninstall`（设置和你做的形象留在 `~/.claude/minty`，不要了就删掉）。
+Linux 上不想让它用 sudo 装系统软件包：加 `--no-system-packages`，它会列出缺的包，你自己装。
+
+**想改名字、换形象、换声音**：再运行一次 setup，或者在面板里点“⚙ 设置”。
+**卸载**：`./setup.sh --uninstall` / `setup.cmd -Uninstall`（设置和你做的形象留在 `~/.claude/minty`，不要了就删掉）。
 
 ### 权限
 
-- **麦克风**：第一次录音时 macOS 会问，点“允许”。没弹窗、录音一直失败：系统设置 → 隐私与安全性 → 麦克风，打开 Claude（或你用的终端），然后重启它
-- **输入监控**（只有快捷键要）：按住快捷键没反应时，系统设置 → 隐私与安全性 → 输入监控，打开 Claude（或你用的终端），然后重启它
+| | 麦克风 | 快捷键 |
+| --- | --- | --- |
+| macOS | 第一次录音时会问，点“允许”。没弹窗、录音一直失败：系统设置 → 隐私与安全性 → 麦克风，打开 Claude（或你用的终端），然后重启它 | 系统设置 → 隐私与安全性 → **输入监控**，打开 Claude（或你用的终端），然后重启它 |
+| Windows | 设置 → 隐私和安全性 → 麦克风，打开“允许桌面应用访问麦克风” | 不用权限 |
+| Linux | 一般不用；录不到声音时检查系统的默认输入设备（PulseAudio / PipeWire） | 要读键盘，得在 **input 组**里：`sudo usermod -aG input $USER`，然后注销重新登录（setup 会问你要不要加）。这样以你身份运行的程序都能读键盘输入 |
 
 ### 隐私
 
 - 录音和转写**完全在你电脑上**，录音文件转写完就删
 - 整理指令、念的总结用你的 Claude 额度（默认 haiku，很便宜）
-- 默认的神经网络声音（edge-tts）需要联网，**要念的那一两句总结会发到微软的语音服务**。介意的话 setup 时选 macOS 自带的 say（离线）
+- 默认的神经网络声音（edge-tts）需要联网，**要念的那一两句总结会发到微软的语音服务**。介意的话 setup 时选系统自带的朗读（离线：macOS 的 say、Windows 的 System.Speech、Linux 的 espeak-ng）
 - 问天气时会请求 wttr.in（它会看到你的 IP，以及你问的城市）
 
 ---
@@ -69,12 +90,18 @@ cd minty-voice
 
 ### 按住快捷键说话
 
-在任何 App 里**按住快捷键就开始录，松开就发出**。
+在任何程序里**按住快捷键就开始录，松开就发出**。可选的键：
+
+| macOS | Windows | Linux |
+| --- | --- | --- |
+| 右 Option（默认）、右 Command、右 Control、Fn | 右 Alt（默认）、右 Win、右 Ctrl | 右 Alt（默认）、右 Super、右 Ctrl |
+
 
 - 按不到 0.3 秒就松开当误碰；按住时又按了别的键（比如右 Option + 字母打特殊字符）也不算
 - 只监听不拦截：这个键照常能用
 - 开着好几个会话时，只有**最近用过**的那个会话接这个键（在里面发过消息、点过它的那个）
-- 用 Fn 的话，先在 系统设置 → 键盘 里把“按下 🌐 键时”改成“无操作”
+- macOS 用 Fn 的话，先在 系统设置 → 键盘 里把“按下 🌐 键时”改成“无操作”
+- Linux 读的是内核的键盘事件，X11 和 Wayland 都能用
 
 ### 聊天还是干活
 
@@ -132,10 +159,10 @@ cd minty-voice
 视频格式随意（mp4 / mov / webm / gif…），也可以用装满逐帧图片的文件夹（`idle/0001.png`…）。然后：
 
 ```bash
-./tools/make-avatar.sh ~/Desktop/my-dog --name "小狗"
+./tools/make-avatar.sh ~/Desktop/my-dog --name "小狗"        # Windows：tools\make-avatar.cmd C:\Users\me\Desktop\my-dog --name "小狗"
 ```
 
-（第一次要 `brew install ffmpeg libavif uv`；setup.sh 里选“用我自己的动画做一个”会自动装。）
+（要有 ffmpeg 和 uv；setup 里选“用我自己的动画做一个”会自动装。）
 
 它会：
 
@@ -171,7 +198,7 @@ cd minty-voice
 | 界面 | 光球 | 光球：面板 + 右下角小圆圈，说完直接发；横栏：输入框上方一条，先预览 |
 | 按住说话的键 | 右 Option | 右 Option / 右 Command / 右 Control / Fn / 关 |
 | 朗读回复 | 开 | 关掉后什么都不念 |
-| 朗读引擎 | `edge` | `edge`：神经网络声音，自然、需联网；`say`：macOS 自带，离线 |
+| 朗读引擎 | `edge` | `edge`：神经网络声音，自然、需联网；`say`：系统自带的朗读，离线 |
 | 声音 | 晓晓 | 晓晓（女声温和）、云希（男声阳光）、晓伊（女声活泼）、云扬（男声播音腔） |
 | 语速 | `+8%` | 相对正常语速，如 `+0%`、`+20%`、`-10%` |
 | say 的声音 | `Tingting` | 任何 `say -v '?'` 列出的声音名；edge 用不了时也用它 |
@@ -190,12 +217,14 @@ cd minty-voice
 ## 文件
 
 ```
-setup.sh                 安装 / 改设置 / 卸载
-tools/make-avatar.sh     用你的视频做形象包
+setup.sh                 安装 / 改设置 / 卸载（macOS / Linux）
+setup.cmd, setup.ps1     同上（Windows）
+tools/make-avatar.sh     用你的视频做形象包（Windows：make-avatar.cmd）
 .claude-plugin/          插件清单（plugin.json）和 marketplace（marketplace.json）
 hooks/register.tsx       全部逻辑；minty.test.tsx 是测试（claude plugin test .）
 avatars/cat/             自带的猫
-ptt/minty-ptt.swift      快捷键监听（几十行 Swift，第一次用时编译）
+ptt/                     快捷键监听：minty-ptt.swift（macOS，第一次用时编译）、
+                         minty-ptt-linux.py（Linux，读 /dev/input）、minty-ptt.ps1（Windows，PowerShell）
 ~/.claude/minty/         你的设置（config.json）和你做的形象（avatars/）
 ```
 

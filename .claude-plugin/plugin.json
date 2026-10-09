@@ -1,7 +1,7 @@
 {
   "name": "minty",
-  "version": "0.3.0",
-  "description": "给 Claude Code 的语音助手（macOS）：点形象或按住快捷键说中英混合的话 → 本地 whisper.cpp 转写 → 整理成清晰的指令发给 Claude；回复完用语音念总结。名字、命令、形象动画都能换",
+  "version": "0.4.0",
+  "description": "给 Claude Code 的语音助手（macOS / Windows / Linux）：点形象或按住快捷键说中英混合的话 → 本地 whisper.cpp 转写 → 整理成清晰的指令发给 Claude；回复完用语音念总结。名字、命令、形象动画都能换",
   "author": {
     "name": "Feiyu Chang",
     "url": "https://github.com/alanfeiyuchang"
@@ -73,7 +73,7 @@
     "ttsEngine": {
       "type": "string",
       "title": "朗读引擎",
-      "description": "edge：微软神经网络声音，自然、中英混读好，需联网，要念的总结会发到微软的语音服务；say：macOS 自带，离线但比较机械",
+      "description": "edge：微软神经网络声音，自然、中英混读好，需联网，要念的总结会发到微软的语音服务；say：系统自带的朗读，离线但比较机械",
       "options": [
         "edge",
         "say"
@@ -101,7 +101,7 @@
     "voice": {
       "type": "string",
       "title": "朗读声音（say）",
-      "description": "macOS 系统声音名，如 Tingting（普通话）、Meijia（台湾）、Samantha（英文）；edge 不可用时也用它",
+      "description": "macOS 的系统声音名（Windows / Linux 用系统默认声音），如 Tingting（普通话）、Meijia（台湾）、Samantha（英文）；edge 不可用时也用它",
       "default": "Tingting"
     },
     "vocabulary": {

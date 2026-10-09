@@ -31,7 +31,6 @@ const idleVariant = atom({ plugin: 'minty', key: 'idleVariant' } as const, '')
 // 设置面板改过的项（存在 $.store 里，跨会话保留）；变了就重画面板
 const prefs = atom({ plugin: 'minty', key: 'prefs' } as const, {} as Record<string, string | boolean>)
 
-const BIN_DIRS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin']
 const MAX_SECONDS = 180
 
 // 给 whisper 的“上文提示”：whisper 会模仿上文的写法。用一段真实口吻的中英混说
@@ -125,6 +124,153 @@ let speaking: Spawned | null = null
 let speechGen = 0
 let speakNextAnswer = false
 
+// ---------- 系统 ----------
+//
+// 和操作系统打交道的地方都在这一节：判断是 macOS / Linux / Windows，找程序，拼路径，删文件、建目录。
+// 录音、播放、朗读、快捷键监听在各自那一节里按系统分开。（插件不能把 $ 传给别的文件里的函数，所以都放在这个文件里）
+
+type OS = 'mac' | 'linux' | 'windows'
+
+type Platform = {
+  os: OS
+  home: string
+  /** 放录音、合成语音的临时目录 */
+  tmp: string
+  sep: '/' | '\\'
+  /** ~/.claude/minty：设置、形象、setup 装的程序 */
+  dataDir: string
+  /** 找程序的目录，按顺序 */
+  binDirs: string[]
+}
+
+let cached: Promise<Platform> | null = null
+/** 同步能读到的系统（第一次 platform() 之前是 mac） */
+let currentOs: OS = 'mac'
+
+function platform($: Engine): Promise<Platform> {
+  cached ??= detect($)
+  return cached
+}
+
+async function detect($: Engine): Promise<Platform> {
+  let os: OS
+  if ((await $.env.get('OS')) === 'Windows_NT') os = 'windows'
+  else {
+    try {
+      const r = await $.process.run(['uname', '-s'], { timeoutMs: 5000 })
+      os = r.stdout.trim() === 'Linux' ? 'linux' : 'mac'
+    } catch {
+      os = 'mac'
+    }
+  }
+  currentOs = os
+  const sep = os === 'windows' ? '\\' : '/'
+  const home = ((await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || '').replace(/[\\/]+$/, '')
+  const j = (...p: string[]) => p.join(sep)
+  const mintyDir = j(home, '.claude', 'minty')
+  const pathDirs = ((await $.env.get('PATH')) ?? (await $.env.get('Path')) ?? '').split(os === 'windows' ? ';' : ':').filter(Boolean)
+  let tmp = '/tmp'
+  let extra: string[]
+  if (os === 'mac') {
+    extra = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', j(home, '.local', 'bin')]
+  } else if (os === 'linux') {
+    extra = [j(home, '.local', 'bin'), '/home/linuxbrew/.linuxbrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/snap/bin']
+  } else {
+    tmp = ((await $.env.get('TEMP')) || (await $.env.get('TMP')) || j(home, 'AppData', 'Local', 'Temp')).replace(/[\\/]+$/, '')
+    const local = (await $.env.get('LOCALAPPDATA')) || j(home, 'AppData', 'Local')
+    const root = (await $.env.get('SystemRoot')) || 'C:\\Windows'
+    extra = [
+      j(home, '.local', 'bin'),
+      j(local, 'Microsoft', 'WinGet', 'Links'),
+      'C:\\Program Files (x86)\\sox-14-4-2',
+      'C:\\Program Files\\sox-14-4-2',
+      'C:\\ProgramData\\chocolatey\\bin',
+      j(home, 'scoop', 'shims'),
+      j(root, 'System32'),
+      j(root, 'System32', 'WindowsPowerShell', 'v1.0'),
+    ]
+  }
+  // setup 装的程序（whisper.cpp 预编译包、链接）最优先；然后是各系统常见的位置；最后是 PATH
+  const binDirs = [...new Set([j(mintyDir, 'bin'), j(mintyDir, 'whisper'), ...extra, ...pathDirs])]
+  return { os, home, tmp, sep, dataDir: mintyDir, binDirs }
+}
+
+function join(p: Platform, ...parts: string[]): string {
+  return parts.join(p.sep)
+}
+
+/** 按名字找程序；Windows 上补 .exe */
+async function findBin($: Engine, names: readonly string[]): Promise<string | null> {
+  const p = await platform($)
+  const exts = p.os === 'windows' ? ['.exe', '.cmd', ''] : ['']
+  for (const dir of p.binDirs) {
+    for (const name of names) {
+      for (const ext of exts) {
+        const path = `${dir}${p.sep}${name}${ext}`
+        if (await $.fs.exists(path)) return path
+      }
+    }
+  }
+  return null
+}
+
+/** ~ 开头的路径换成主目录 */
+async function expandHome($: Engine, path: string): Promise<string> {
+  const p = await platform($)
+  const full = path.startsWith('~/') || path.startsWith('~\\') ? p.home + p.sep + path.slice(2) : path
+  return p.os === 'windows' ? full.replace(/\//g, '\\') : full
+}
+
+/** Windows 上用 PowerShell 做文件操作：路径经环境变量传，不用担心空格和引号 */
+async function powershell($: Engine, script: string, env: Record<string, string> = {}, input?: string) {
+  const ps = (await findBin($, ['powershell'])) ?? 'powershell.exe'
+  return $.process.run([ps, '-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 15_000, env, ...(input === undefined ? {} : { stdin: input }) })
+}
+
+async function removeFile($: Engine, file: string) {
+  const p = await platform($)
+  try {
+    if (p.os === 'windows') await powershell($, 'Remove-Item -LiteralPath $env:MINTY_PATH -Force -ErrorAction SilentlyContinue', { MINTY_PATH: file })
+    else await $.process.run(['/bin/rm', '-f', file], { timeoutMs: 5000 })
+  } catch {}
+}
+
+async function makeDir($: Engine, dir: string) {
+  const p = await platform($)
+  try {
+    if (p.os === 'windows') await powershell($, 'New-Item -ItemType Directory -Force -Path $env:MINTY_PATH | Out-Null', { MINTY_PATH: dir })
+    else await $.process.run(['/bin/mkdir', '-p', dir], { timeoutMs: 5000 })
+  } catch {}
+}
+
+/**
+ * 按命令行找到并结束一个进程（录音的 sox、上次留下的快捷键监听程序）。
+ * macOS / Linux 用 pkill：gentle 时发 SIGINT，sox 会正常收尾、写好 wav 文件头。
+ * Windows 没有 SIGINT 可发，返回 false，调用方直接结束自己拿着的那个子进程。
+ */
+async function killMatching($: Engine, pattern: string, gentle: boolean): Promise<boolean> {
+  const p = await platform($)
+  if (p.os === 'windows') return false
+  try {
+    await $.process.run(gentle ? ['/usr/bin/pkill', '-INT', '-f', pattern] : ['/usr/bin/pkill', '-f', pattern], { timeoutMs: 5000 })
+  } catch {}
+  return true
+}
+
+/** 缺什么时该怎么装：给提示用 */
+function installHint(os: OS, what: 'sox' | 'whisper' | 'player' | 'speech'): string {
+  const setup = os === 'windows' ? '在插件目录运行 setup.cmd' : '在插件目录运行 ./setup.sh'
+  if (os === 'mac') return { sox: 'brew install sox', whisper: 'brew install whisper-cpp', player: 'brew install sox', speech: '系统自带 say' }[what]
+  if (os === 'linux')
+    return {
+      sox: 'sudo apt install sox libsox-fmt-all（或者 ' + setup + '）',
+      whisper: setup,
+      player: 'sudo apt install ffmpeg',
+      speech: 'sudo apt install espeak-ng',
+    }[what]
+  return { sox: setup + '（会用 winget 装 SoX）', whisper: setup, player: setup + '（会用 winget 装 FFmpeg）', speech: 'Windows 自带' }[what]
+}
+
 // ---------- 小工具 ----------
 
 async function setPhase($: Engine, p: Phase, msg = '') {
@@ -132,37 +278,17 @@ async function setPhase($: Engine, p: Phase, msg = '') {
   await update($, note, () => msg)
 }
 
-async function findBin($: Engine, names: readonly string[]): Promise<string | null> {
-  for (const dir of BIN_DIRS) {
-    for (const name of names) {
-      const path = `${dir}/${name}`
-      if (await $.fs.exists(path)) return path
-    }
-  }
-  return null
-}
-
 async function modelPath($: Engine): Promise<string> {
-  const p = opt.whisperModel.trim()
-  if (!p.startsWith('~/')) return p
-  const home = (await $.env.get('HOME')) ?? ''
-  return home + p.slice(1)
+  return expandHome($, opt.whisperModel.trim())
 }
 
 // edge-tts：`uv tool install edge-tts` / `pipx install edge-tts` 装在 ~/.local/bin；
 // 都没有但有 uv 时用 `uvx edge-tts` 临时跑
 async function findEdgeTts($: Engine): Promise<string[] | null> {
-  const home = (await $.env.get('HOME')) ?? ''
-  const dirs = [`${home}/.local/bin`, ...BIN_DIRS]
-  for (const dir of dirs) if (await $.fs.exists(`${dir}/edge-tts`)) return [`${dir}/edge-tts`]
-  for (const dir of dirs) if (await $.fs.exists(`${dir}/uvx`)) return [`${dir}/uvx`, 'edge-tts']
-  return null
-}
-
-async function removeFile($: Engine, file: string) {
-  try {
-    await $.process.run(['/bin/rm', '-f', file], { timeoutMs: 5000 })
-  } catch {}
+  const edge = await findBin($, ['edge-tts'])
+  if (edge) return [edge]
+  const uvx = await findBin($, ['uvx'])
+  return uvx ? [uvx, 'edge-tts'] : null
 }
 
 // ---------- 录音 ----------
@@ -173,14 +299,18 @@ async function startRecording($: Engine) {
   stopSpeaking()
   await update($, said, () => '')
   const sox = await findBin($, ['sox'])
+  const pf = await platform($)
   if (!sox) {
-    await setPhase($, 'idle', '没找到 sox：先运行 brew install sox')
+    await setPhase($, 'idle', '没找到 sox：' + installHint(pf.os, 'sox'))
     return
   }
-  const file = `/tmp/minty-${await $.clock.now()}.wav`
-  // -d = 默认麦克风；16kHz 单声道 16bit 正是 whisper 要的格式
+  // -d = 默认麦克风；16kHz 单声道 16bit 正是 whisper 要的格式。
+  // Windows 上没法让 sox 正常收尾（没有 SIGINT），直接结束的话 wav 文件头是坏的：
+  // 先录成不带文件头的 raw，停下后再转成 wav（stopRecording 里）
+  const rawPcm = pf.os === 'windows'
+  const file = join(pf, pf.tmp, `minty-${await $.clock.now()}.${rawPcm ? 'raw' : 'wav'}`)
   const stream = $.process.spawn({
-    argv: [sox, '-q', '-d', '-c', '1', '-r', '16000', '-b', '16', file, 'trim', '0', String(MAX_SECONDS)],
+    argv: [sox, '-q', '-d', '-c', '1', '-r', '16000', '-b', '16', ...(rawPcm ? ['-e', 'signed-integer', '-t', 'raw'] : []), file, 'trim', '0', String(MAX_SECONDS)],
   })
   let stderr = ''
   const done = (async () => {
@@ -213,19 +343,30 @@ async function stopRecording($: Engine, discard = false) {
   const rec = recording
   if (!rec) return
   recording = null
-  // SIGINT 让 sox 正常收尾、写好 wav 文件头
-  try {
-    await $.process.run(['/usr/bin/pkill', '-INT', '-f', rec.file], { timeoutMs: 5000 })
-  } catch {}
-  const ended = await Promise.race([rec.done.then(() => true), $.clock.sleep(3000).then(() => false)])
-  if (!ended) await rec.stream.return(undefined as never).catch(() => undefined)
+  // macOS / Linux：SIGINT 让 sox 正常收尾、写好 wav 文件头；Windows：直接结束（录的是 raw）
+  const signalled = await killMatching($, rec.file, true)
+  const ended = signalled && (await Promise.race([rec.done.then(() => true), $.clock.sleep(3000).then(() => false)]))
+  if (!ended) {
+    await rec.stream.return(undefined as never).catch(() => undefined)
+    await Promise.race([rec.done, $.clock.sleep(2000)])
+  }
 
   if (discard) {
     await removeFile($, rec.file)
     await setPhase($, 'idle')
     return
   }
-  await transcribeAndRefine($, rec.file)
+  let file = rec.file
+  if (file.endsWith('.raw')) {
+    const wav = file.slice(0, -4) + '.wav'
+    const sox = await findBin($, ['sox'])
+    try {
+      if (sox) await $.process.run([sox, '-q', '-t', 'raw', '-r', '16000', '-b', '16', '-c', '1', '-e', 'signed-integer', file, wav], { timeoutMs: 30_000 })
+    } catch {}
+    void removeFile($, file)
+    file = wav
+  }
+  await transcribeAndRefine($, file)
 }
 
 // ---------- 转写 + 整理 ----------
@@ -269,7 +410,7 @@ async function transcribe($: Engine, file: string): Promise<Heard> {
   // 16kHz × 16bit 单声道 ≈ 32KB/秒；不到半秒当作没说话
   if (size < 16_000) return { error: '没听到声音，再试一次？' }
   const whisper = await findBin($, ['whisper-cli', 'whisper-cpp'])
-  if (!whisper) return { error: '没找到 whisper.cpp：先运行 brew install whisper-cpp' }
+  if (!whisper) return { error: '没找到 whisper.cpp：' + installHint((await platform($)).os, 'whisper') }
   const model = await modelPath($)
   if (!(await $.fs.exists(model))) return { error: `没找到模型文件 ${model}（见 README 下载）` }
   const recent = await recentMessages($)
@@ -416,7 +557,8 @@ async function speak($: Engine, text: string) {
 // 第一句出来就开口。返回没念到的句数，0 表示念完或被打断
 async function speakEdge($: Engine, edge: string[], chunks: string[], gen: number): Promise<number> {
   const voice = /[\u3400-\u9fff]/.test(chunks.join('')) ? opt.edgeVoice : EDGE_VOICE_FOR_ENGLISH
-  const base = `/tmp/minty-tts-${await $.clock.now()}`
+  const pf = await platform($)
+  const base = join(pf, pf.tmp, `minty-tts-${await $.clock.now()}`)
   const synth = (i: number): Promise<string | null> => {
     const file = `${base}-${i}.mp3`
     return $.process
@@ -429,6 +571,7 @@ async function speakEdge($: Engine, edge: string[], chunks: string[], gen: numbe
       )
   }
   const player = await playerFor($)
+  if (!player) return chunks.length // 没有能放 mp3 的程序：整段交给系统朗读
   let pending: Promise<string | null> | null = synth(0)
   try {
     for (let i = 0; i < chunks.length; i++) {
@@ -441,7 +584,7 @@ async function speakEdge($: Engine, edge: string[], chunks: string[], gen: numbe
       }
       if (i + 1 < chunks.length) pending = synth(i + 1)
       await play($, player(file))
-      await removeFile($, file)
+      void removeFile($, file)
       if (gen !== speechGen) return 0
     }
     return 0
@@ -455,14 +598,24 @@ async function speakEdge($: Engine, edge: string[], chunks: string[], gen: numbe
 // 句与句之间留的停顿（秒）
 const SENTENCE_PAUSE = '0.15'
 
-// 播放一段 mp3 的命令。优先用 sox 自带的 play：起播只要约 0.1 秒（afplay 要 0.8 秒），
-// 还能顺手把 edge-tts 每段首尾约 0.2 + 0.5 秒的静音剪掉，只留一个自然的短停顿。
-// 每句之间的空隙因此从约 1.4 秒降到 0.25 秒左右
-async function playerFor($: Engine): Promise<(file: string) => string[]> {
-  const playBin = await findBin($, ['play'])
-  if (!playBin) return file => ['/usr/bin/afplay', file]
+// 播放一段 mp3 的命令，顺手把 edge-tts 每段首尾约 0.2 + 0.5 秒的静音剪掉，只留一个自然的短停顿，
+// 每句之间的空隙从约 1.4 秒降到 0.25 秒左右。
+// macOS：优先 sox 的 play（起播约 0.1 秒，afplay 要 0.8 秒），没有就 afplay。
+// Linux / Windows：ffplay（装 FFmpeg 就有），其次 mpv，Linux 再试 sox 的 play；都没有就返回 null
+async function playerFor($: Engine): Promise<((file: string) => string[]) | null> {
+  const os = (await platform($)).os
   const trim = ['silence', '1', '0.02', '0.3%', 'reverse', 'silence', '1', '0.02', '0.3%', 'reverse', 'pad', '0', SENTENCE_PAUSE]
-  return file => [playBin, '-q', file, ...trim]
+  const playBin = os === 'windows' ? null : await findBin($, ['play'])
+  if (os === 'mac') return playBin ? file => [playBin, '-q', file, ...trim] : file => ['/usr/bin/afplay', file]
+  const ffplay = await findBin($, ['ffplay'])
+  if (ffplay) {
+    const cut = 'silenceremove=start_periods=1:start_threshold=-45dB'
+    const af = `${cut},areverse,${cut},areverse,apad=pad_dur=${SENTENCE_PAUSE}`
+    return file => [ffplay, '-nodisp', '-autoexit', '-loglevel', 'quiet', '-af', af, file]
+  }
+  const mpv = await findBin($, ['mpv'])
+  if (mpv) return file => [mpv, '--no-video', '--really-quiet', file]
+  return playBin ? file => [playBin, '-q', file, ...trim] : null
 }
 
 // 给语音合成的文字：去掉 markdown 符号和网址，这些念出来都是噪音
@@ -493,8 +646,21 @@ function speechChunks(text: string): string[] {
   return out
 }
 
+// 系统自带的朗读：macOS 的 say，Linux 的 espeak-ng / spd-say，Windows 的 System.Speech
 async function say($: Engine, text: string, voice: string | null): Promise<boolean> {
-  return play($, voice ? ['/usr/bin/say', '-v', voice] : ['/usr/bin/say'], text)
+  const os = (await platform($)).os
+  if (os === 'mac') return play($, voice ? ['/usr/bin/say', '-v', voice] : ['/usr/bin/say'], text)
+  if (os === 'windows') {
+    const ps = (await findBin($, ['powershell'])) ?? 'powershell.exe'
+    const script =
+      '[Console]::InputEncoding=[Text.Encoding]::UTF8; Add-Type -AssemblyName System.Speech; ' +
+      '$s=New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak([Console]::In.ReadToEnd())'
+    return play($, [ps, '-NoProfile', '-NonInteractive', '-Command', script], text)
+  }
+  const espeak = await findBin($, ['espeak-ng', 'espeak'])
+  if (espeak) return play($, [espeak, '-v', /[\u3400-\u9fff]/.test(text) ? 'cmn' : 'en', '--stdin'], text)
+  const spd = await findBin($, ['spd-say'])
+  return spd ? play($, [spd, '-w', text]) : false
 }
 
 // 跑一个出声的进程，记在 speaking 里好让“别念了”能掐掉它
@@ -723,7 +889,10 @@ async function orbLook($: Engine, hint: string): Promise<{ mood: OrbMood; label:
 // 不然开着几个会话时一按，几个会话同时录音。在哪个会话里发过消息、点过 MINTY，键就归哪个会话。
 
 const PTT_MIN_MS = 300
-const PTT_OWNER = '/tmp/minty-ptt-owner'
+async function pttOwnerFile($: Engine): Promise<string> {
+  const pf = await platform($)
+  return join(pf, pf.tmp, 'minty-ptt-owner')
+}
 const PTT_KEYS = ['right-option', 'right-command', 'right-control', 'fn', 'off'] as const
 
 let pttStream: Spawned | null = null
@@ -733,44 +902,53 @@ let pttHeld = false
 async function claimPtt($: Engine) {
   if (opt.pttKey === 'off') return
   try {
-    await $.fs.write(PTT_OWNER, await $.session.id())
+    await $.fs.write(await pttOwnerFile($), await $.session.id())
   } catch {}
 }
 
 async function ownsPtt($: Engine): Promise<boolean> {
   try {
-    return (await $.fs.read(PTT_OWNER)).trim() === (await $.session.id())
+    return (await $.fs.read(await pttOwnerFile($))).trim() === (await $.session.id())
   } catch {
     return true // 还没人认领过：谁先收到谁接
   }
 }
 
-async function pttBinary($: Engine): Promise<string | null> {
-  const dir = `${$.plugin.root}/ptt`
-  const bin = `${dir}/minty-ptt`
-  if (await $.fs.exists(bin)) return bin
+// 每个系统的监听程序，都是“每次按下/松开往 stdout 打一行”：
+//   macOS    ptt/minty-ptt.swift，第一次用时编译（CGEventTap，要「输入监控」权限）
+//   Linux    ptt/minty-ptt-linux.py，系统自带的 python3 直接跑（读 /dev/input，要在 input 组里；X11 / Wayland 都行）
+//   Windows  ptt/minty-ptt.ps1，PowerShell 直接跑（GetAsyncKeyState，不用权限）
+async function pttCommand($: Engine): Promise<string[] | string> {
+  const pf = await platform($)
+  const dir = join(pf, $.plugin.root, 'ptt')
+  if (pf.os === 'windows') {
+    const ps = (await findBin($, ['powershell'])) ?? 'powershell.exe'
+    return [ps, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(pf, dir, 'minty-ptt.ps1')]
+  }
+  if (pf.os === 'linux') {
+    const py = await findBin($, ['python3'])
+    return py ? [py, join(pf, dir, 'minty-ptt-linux.py')] : '快捷键说话要 python3：sudo apt install python3'
+  }
+  const bin = join(pf, dir, 'minty-ptt')
+  if (await $.fs.exists(bin)) return [bin]
   const swiftc = await findBin($, ['swiftc'])
-  if (!swiftc) return null
-  const r = await $.process.run([swiftc, '-O', `${dir}/minty-ptt.swift`, '-o', bin], { timeoutMs: 180_000 })
-  return r.exitCode === 0 ? bin : null
+  const r = swiftc ? await $.process.run([swiftc, '-O', join(pf, dir, 'minty-ptt.swift'), '-o', bin], { timeoutMs: 180_000 }) : null
+  return r?.exitCode === 0 ? [bin] : '快捷键说话没开起来：编译 ptt/minty-ptt.swift 失败（要装 Xcode 命令行工具：xcode-select --install）'
 }
 
 async function startPtt($: Engine) {
   stopPtt()
   if (opt.pttKey === 'off') return
-  const bin = await pttBinary($)
-  if (!bin) {
-    const msg = '快捷键说话没开起来：编译 ptt/minty-ptt.swift 失败（要装 Xcode 命令行工具）'
-    await update($, note, () => msg)
-    void $.ui.toast(msg)
+  const cmd = await pttCommand($)
+  if (typeof cmd === 'string') {
+    await update($, note, () => cmd)
+    void $.ui.toast(cmd)
     return
   }
-  // 热重载留下的同一会话的旧监听程序先收掉（第二个参数是会话 id，只是个标记）
+  // 热重载留下的同一会话的旧监听程序先收掉（最后一个参数是会话 id，只是个标记）
   const tag = await $.session.id()
-  try {
-    await $.process.run(['/usr/bin/pkill', '-f', `minty-ptt ${opt.pttKey} ${tag}`], { timeoutMs: 5000 })
-  } catch {}
-  const stream = $.process.spawn({ argv: [bin, opt.pttKey, tag] })
+  await killMatching($, `minty-ptt[^ ]* ${opt.pttKey} ${tag}`, false)
+  const stream = $.process.spawn({ argv: [...cmd, opt.pttKey, tag] })
   pttStream = stream
   void (async () => {
     let buf = ''
@@ -796,8 +974,14 @@ function stopPtt() {
 }
 
 async function onPtt($: Engine, line: string) {
-  if (line === 'no-permission') {
-    const msg = '快捷键说话要「输入监控」权限：系统设置 → 隐私与安全性 → 输入监控 里打开 Claude，然后重启 Claude'
+  if (line === 'no-permission' || line === 'unsupported') {
+    const os = (await platform($)).os
+    const msg =
+      line === 'unsupported'
+        ? '这个系统上不支持把 Fn 当快捷键，换一个键（设置 → 按住说话的键）'
+        : os === 'linux'
+          ? '快捷键说话要能读键盘：运行 sudo usermod -aG input $USER，然后注销重新登录'
+          : '快捷键说话要「输入监控」权限：系统设置 → 隐私与安全性 → 输入监控 里打开 Claude，然后重启 Claude'
     await update($, note, () => msg)
     void $.ui.toast(msg)
     return
@@ -948,7 +1132,7 @@ const FIELDS: readonly Field[] = [
   { key: 'uiStyle', title: '界面', help: '光球：只留一个转圈按钮；横栏：输入框上方一条，先预览再发', choices: [{ value: 'orb', label: '光球' }, { value: 'bar', label: '横栏' }] },
   { key: 'avatar', title: '形象', help: '面板里画哪套动画；自己做的用 tools/make-avatar.sh 生成到 ~/.claude/minty/avatars/' },
   { key: 'speakReplies', title: '朗读回复', help: '关掉后什么都不念', choices: ON_OFF },
-  { key: 'ttsEngine', title: '朗读引擎', help: 'edge 自然、需联网（念的话会发到微软语音服务）；say 是 macOS 自带、离线', choices: [{ value: 'edge', label: 'edge 神经网络声音' }, { value: 'say', label: 'macOS say' }] },
+  { key: 'ttsEngine', title: '朗读引擎', help: 'edge 自然、需联网（念的话会发到微软语音服务）；say 是系统自带的朗读、离线（macOS say / Windows System.Speech / Linux espeak-ng）', choices: [{ value: 'edge', label: 'edge 神经网络声音' }, { value: 'say', label: 'macOS say' }] },
   {
     key: 'edgeVoice',
     title: '声音',
@@ -961,7 +1145,7 @@ const FIELDS: readonly Field[] = [
     ],
   },
   { key: 'speechRate', title: '语速', help: '相对正常语速，如 +0%、+15%、-10%' },
-  { key: 'voice', title: 'say 的声音', help: 'macOS 声音名，edge 用不了时也用它，如 Tingting' },
+  { key: 'voice', title: 'say 的声音', help: 'macOS 的系统声音名，edge 用不了时也用它，如 Tingting（Windows / Linux 用系统默认声音，不看这一项）' },
   { key: 'refineModel', title: '模型', help: '整理指令、快脑回应、念的总结都用它', choices: [{ value: 'haiku', label: 'haiku · 快' }, { value: 'sonnet', label: 'sonnet' }, { value: 'opus', label: 'opus · 慢' }] },
   { key: 'language', title: '识别语言', help: '中英混说用 zh 最稳', choices: [{ value: 'zh', label: 'zh' }, { value: 'auto', label: 'auto' }, { value: 'en', label: 'en' }] },
   { key: 'vocabulary', title: '常用词', help: '容易被听错的英文词，逗号分隔' },
@@ -1020,7 +1204,7 @@ function applyOptions(options: Record<string, unknown>) {
 
 // 设置文件：setup.sh 和设置面板都写它，只存改过的项。优先级：manifest 默认 < settings.json 的 pluginConfigs < 这个文件
 async function configPath($: Engine): Promise<string> {
-  return `${await dataDir($)}/config.json`
+  return join(await platform($), await dataDir($), 'config.json')
 }
 
 async function readConfig($: Engine): Promise<Record<string, string | boolean>> {
@@ -1033,7 +1217,7 @@ async function readConfig($: Engine): Promise<Record<string, string | boolean>> 
 
 async function writeConfig($: Engine, config: Record<string, string | boolean>) {
   try {
-    await $.process.run(['/bin/mkdir', '-p', await dataDir($)], { timeoutMs: 5000 })
+    await makeDir($, await dataDir($))
     await $.fs.write(await configPath($), JSON.stringify(config, null, 2) + '\n')
   } catch {}
   await update($, prefs, () => config)
@@ -1088,9 +1272,16 @@ async function resetPrefs($: Engine) {
   if (opt.pttKey !== key) await startPtt($)
 }
 
-// 有选项的设置；形象的选项是扫出来的形象包
+// 有选项的设置；形象的选项是扫出来的形象包；快捷键按系统叫法
 function choicesOf(f: Field): readonly { value: string; label: string }[] | undefined {
   if (f.key === 'avatar') return [...packs.map(p => ({ value: p.id, label: p.name })), { value: 'orb', label: '光球' }]
+  if (f.key === 'pttKey' && currentOs !== 'mac')
+    return [
+      { value: 'right-option', label: '右 Alt' },
+      { value: 'right-command', label: currentOs === 'windows' ? '右 Win' : '右 Super' },
+      { value: 'right-control', label: '右 Ctrl' },
+      { value: 'off', label: '关' },
+    ]
   return f.choices
 }
 
@@ -1133,7 +1324,7 @@ let packsScanned = false
 const avatarCache = new Map<string, string | null>()
 
 async function dataDir($: Engine): Promise<string> {
-  return `${(await $.env.get('HOME')) ?? ''}/.claude/minty`
+  return (await platform($)).dataDir
 }
 
 async function scanPacks($: Engine) {
@@ -1281,13 +1472,18 @@ async function checkSetup($: Engine): Promise<string> {
   const model = await modelPath($)
   const hasModel = await $.fs.exists(model)
   const edge = await findEdgeTts($)
+  const os = (await platform($)).os
+  const player = os === 'mac' ? true : !!(await playerFor($))
+  const sysVoice = { mac: `macOS say，声音 ${opt.voice}`, linux: 'espeak-ng', windows: 'Windows 自带的朗读' }[os]
   return [
-    `${sox ? '✓' : '✗'} sox ${sox ?? '— brew install sox'}`,
-    `${whisper ? '✓' : '✗'} whisper.cpp ${whisper ?? '— brew install whisper-cpp'}`,
+    `· 系统 ${{ mac: 'macOS', linux: 'Linux', windows: 'Windows' }[os]}`,
+    `${sox ? '✓' : '✗'} sox ${sox ?? '— ' + installHint(os, 'sox')}`,
+    `${whisper ? '✓' : '✗'} whisper.cpp ${whisper ?? '— ' + installHint(os, 'whisper')}`,
     `${hasModel ? '✓' : '✗'} 模型 ${model}${hasModel ? '' : ' — 见 README 下载'}`,
     opt.ttsEngine === 'edge'
-      ? `${edge ? '✓' : '✗'} 朗读 edge-tts ${edge ? edge.join(' ') : '— uv tool install edge-tts（没装会退回 macOS 的 say）'}，声音 ${opt.edgeVoice}，语速 ${opt.speechRate}`
-      : `· 朗读 macOS say，声音 ${opt.voice}（没装会退回系统默认；系统设置 → 辅助功能 → 朗读内容 → 系统声音 里添加）`,
+      ? `${edge ? '✓' : '✗'} 朗读 edge-tts ${edge ? edge.join(' ') : `— uv tool install edge-tts（没装会退回${sysVoice}）`}，声音 ${opt.edgeVoice}，语速 ${opt.speechRate}`
+      : `· 朗读 ${sysVoice}`,
+    ...(opt.ttsEngine === 'edge' && !player ? [`✗ 放语音的程序（ffplay / mpv）— ${installHint(os, 'player')}；没装会退回${sysVoice}`] : []),
     `· 界面 ${opt.uiStyle === 'orb' ? '光球（终端在右下角，桌面在输入框右上方）' : '横栏'}`,
     `· 朗读回复 ${opt.speakReplies ? '开' : '关（什么都不念）'}`,
     `· 整理/总结模型 ${opt.refineModel}，识别语言 ${opt.language}，整理完 ${opt.autoSend ? '直接发送' : opt.autoFill ? '放进输入框' : '先预览'}`,
@@ -1322,6 +1518,7 @@ function firstLine(s: string): string {
 // ---------- 事件 ----------
 
 export const register: Register = (on, options) => {
+  cached = null // 系统重新判断（热重载、测试里换了环境）
   baseOptions = { ...options }
   applyOptions(options)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """把你自己的动画做成 MINTY 的形象包（一套状态动画），换掉默认的猫。
 
-用法（要先 brew install libavif ffmpeg，Python 依赖用 uv 临时装）：
+用法（视频素材要有 ffmpeg；Python 依赖用 uv 临时装）：
   uv run --with pillow --with numpy --with opencv-python-headless tools/make-avatar.py <素材目录> --name "我的狗"
   或者：./tools/make-avatar.sh <素材目录> --name "我的狗"
 
@@ -27,7 +27,7 @@ MINTY 启动时会扫这里，设置里的“形象”就能选到它。
 为什么是动画 AVIF：桌面版只能用 Svg 元素画图，一个 SVG 最多 128 KB；AVIF 有帧间压缩，
 24 帧 320px 只要几十 KB，放在 SVG 的 <image> 里照样会动。太大时会自动降质量。
 """
-import argparse, base64, json, re, shutil, subprocess, sys, tempfile
+import argparse, base64, io, json, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
 
 import cv2
@@ -106,16 +106,11 @@ def pingpong(frames: list[Image.Image]) -> list[Image.Image]:
 
 
 def avif(frames: list[Image.Image], q: int, fps: int = FPS) -> bytes:
-    with tempfile.TemporaryDirectory() as d:
-        names = []
-        for i, f in enumerate(frames):
-            p = Path(d) / f'f{i:02d}.png'
-            f.save(p)
-            names.append(str(p))
-        out = Path(d) / 'out.avif'
-        subprocess.run(['avifenc', '-q', str(q), '-s', '4', '--fps', str(fps), '-j', 'all', *names, str(out)],
-                       check=True, capture_output=True)
-        return out.read_bytes()
+    """动画 AVIF，用 Pillow 自带的 AVIF 编码（Pillow 11.3 起有，macOS / Linux / Windows 都不用另装东西）。"""
+    buf = io.BytesIO()
+    frames[0].save(buf, format='AVIF', save_all=True, append_images=frames[1:], duration=round(1000 / fps),
+                   loop=0, quality=q, speed=4)
+    return buf.getvalue()
 
 
 def fit_whole(frames: list[Image.Image], px: int) -> list[Image.Image]:
@@ -143,7 +138,7 @@ def read_state(src: Path, state: str, fps: int, src_fps: float, max_frames: int,
         video = src / f'{state}{ext}'
         if video.exists():
             if not shutil.which('ffmpeg'):
-                sys.exit('要处理视频 / GIF 得先装 ffmpeg：brew install ffmpeg')
+                sys.exit('要处理视频 / GIF 得先装 ffmpeg（macOS：brew install ffmpeg；Linux：sudo apt install ffmpeg；Windows：winget install Gyan.FFmpeg）')
             out = work / state
             out.mkdir()
             subprocess.run(['ffmpeg', '-v', 'error', '-i', str(video), '-vf', f'fps={fps}', '-pix_fmt', 'rgba',
@@ -201,8 +196,9 @@ def main():
     ap.add_argument('--seconds', type=float, default=3, help='每个状态最多取几秒（默认 3；越长文件越大、画质越低）')
     a = ap.parse_args()
 
-    if not shutil.which('avifenc'):
-        sys.exit('先装 avifenc：brew install libavif')
+    from PIL import features
+    if not features.check('avif'):
+        sys.exit('这个 Pillow 不支持 AVIF：要 Pillow 11.3 或更新（用 tools/make-avatar.sh / .cmd 运行会自动装对的版本）')
     name = a.name or a.src.resolve().name
     pack_id = a.id or slug(a.name if a.name and slug(a.name) != 'avatar' else a.src.resolve().name)
     max_frames = max(2, round(a.seconds * a.fps))

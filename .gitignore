@@ -18,3 +18,4 @@ jarvis-voice-samples/
 stt-test-audio/
 .DS_Store
 node_modules/
+__pycache__/

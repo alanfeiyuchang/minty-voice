@@ -1,0 +1,6 @@
+# Windows 脚本保持 CRLF；其余 LF
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.sh text eol=lf
+*.py text eol=lf
+*.avif binary
