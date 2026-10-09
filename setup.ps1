@@ -185,8 +185,10 @@ Ok "声音 $Voice，语言 $Language，模型 $ModelFile"
 Step '5/5 安装'
 Refresh-Path
 $soxDirs = @("${env:ProgramFiles(x86)}\sox-14-4-2", "$env:ProgramFiles\sox-14-4-2")
-if ((Has 'sox') -or ($soxDirs | Where-Object { Test-Path (Join-Path $_ 'sox.exe') })) { Ok 'SoX 已安装' } else { Install-WithWinget 'ChrisBagwell.SoX' 'SoX（录音）' }
-if (Has 'ffplay') { Ok 'FFmpeg 已安装' } else { Install-WithWinget 'Gyan.FFmpeg' 'FFmpeg（放语音）' }
+# winget 的 SoX 是便携版：解压在 WinGet\Packages\ChrisBagwell.SoX_…\ 里
+function Find-Sox { (Has 'sox') -or ($soxDirs | Where-Object { Test-Path (Join-Path $_ 'sox.exe') }) -or (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Filter 'ChrisBagwell.SoX*' -Directory -ErrorAction SilentlyContinue) }
+if (Find-Sox) { Ok 'SoX 已安装' } else { Install-WithWinget 'ChrisBagwell.SoX' 'SoX（录音）'; if (-not (Find-Sox)) { Die 'SoX 没装上：试试手动运行 winget install ChrisBagwell.SoX' } }
+if (Has 'ffplay') { Ok 'FFmpeg 已安装' } else { Install-WithWinget 'Gyan.FFmpeg' 'FFmpeg（放语音）'; if (-not (Has 'ffplay')) { Warn 'FFmpeg 好像没装上：没有它会用 Windows 自带的朗读' } }
 if ($Voice -ne 'say') {
   if ((Has 'edge-tts') -or (Test-Path (Join-Path $HOME '.local\bin\edge-tts.exe'))) { Ok 'edge-tts 已安装' }
   else {

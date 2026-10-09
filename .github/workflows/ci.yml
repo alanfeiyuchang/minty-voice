@@ -85,8 +85,9 @@ jobs:
       - name: 依赖都在
         shell: pwsh
         run: |
-          $sox = @("${env:ProgramFiles(x86)}\sox-14-4-2\sox.exe", "$env:ProgramFiles\sox-14-4-2\sox.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $sox) { $sox = (Get-Command sox -ErrorAction Stop).Source }
+          # winget 的 SoX 是便携版，解压在 WinGet\Packages 里（插件也是这么找的）
+          $sox = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter sox.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $sox) { throw '没找到 sox.exe' }
           "sox: $sox"
           "SOX=$sox" | Out-File -Append $env:GITHUB_ENV
           $ffplay = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet" -Recurse -Filter ffplay.exe -ErrorAction SilentlyContinue | Select-Object -First 1

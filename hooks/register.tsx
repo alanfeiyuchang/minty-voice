@@ -179,9 +179,22 @@ async function detect($: Engine): Promise<Platform> {
     tmp = ((await $.env.get('TEMP')) || (await $.env.get('TMP')) || j(home, 'AppData', 'Local', 'Temp')).replace(/[\\/]+$/, '')
     const local = (await $.env.get('LOCALAPPDATA')) || j(home, 'AppData', 'Local')
     const root = (await $.env.get('SystemRoot')) || 'C:\\Windows'
+    // winget 的“便携版”包（SoX、FFmpeg）解压在 WinGet\Packages\<包名>_…\ 里，只把目录加进用户 PATH；
+    // 刚装完、或者 Claude 是在装之前打开的，PATH 里还没有：直接去那里找
+    const pkgRoot = j(local, 'Microsoft', 'WinGet', 'Packages')
+    const portable: string[] = []
+    try {
+      for (const pkg of await $.fs.list(pkgRoot)) {
+        if (pkg.kind !== 'dir' || !/^(ChrisBagwell\.SoX|Gyan\.FFmpeg)/i.test(pkg.name)) continue
+        for (const sub of await $.fs.list(j(pkgRoot, pkg.name))) {
+          if (sub.kind === 'dir') portable.push(j(pkgRoot, pkg.name, sub.name), j(pkgRoot, pkg.name, sub.name, 'bin'))
+        }
+      }
+    } catch {}
     extra = [
       j(home, '.local', 'bin'),
       j(local, 'Microsoft', 'WinGet', 'Links'),
+      ...portable,
       'C:\\Program Files (x86)\\sox-14-4-2',
       'C:\\Program Files\\sox-14-4-2',
       'C:\\ProgramData\\chocolatey\\bin',
