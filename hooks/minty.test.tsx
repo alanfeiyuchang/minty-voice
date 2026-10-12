@@ -58,12 +58,12 @@ function fakeMac(on: On, log: Log, mac: { edge?: 'ok' | 'offline' | 'missing'; h
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on)
   on('fs.exists', async ($, e) => ({
-    value: norm(e.path).endsWith(PTT_BIN) || packFile(e.path) !== undefined || (mac.edgeVenv && norm(e.path) === EDGE_PY) || [SOX, WHISPER, MODEL, ...(edge === 'missing' ? [] : [EDGE]), ...(mac.play ? ['/opt/homebrew/bin/play'] : [])].some(x => norm(e.path).endsWith(x)) || norm(e.path).endsWith('.wav'),
+    value: norm(e.path).endsWith(PTT_BIN) || packFile(e.path) !== undefined || (mac.edgeVenv && norm(e.path).endsWith(EDGE_PY)) || [SOX, WHISPER, MODEL, ...(edge === 'missing' ? [] : [EDGE]), ...(mac.play ? ['/opt/homebrew/bin/play'] : [])].some(x => norm(e.path).endsWith(x)) || norm(e.path).endsWith('.wav'),
   }))
   // 录好的那一段有内容
   // edgeVenv：edge-tts 是 uv tool 装的，命令是指向它虚拟环境的链接
   on('fs.stat', async ($, e) => ({
-    value: { kind: 'file' as const, size: 96_000, mtimeMs: 0, isLink: false, ...(mac.edgeVenv && norm(e.path) === EDGE ? { realPath: EDGE_VENV_BIN } : {}) },
+    value: { kind: 'file' as const, size: 96_000, mtimeMs: 0, isLink: false, ...(mac.edgeVenv && norm(e.path).endsWith(EDGE) ? { realPath: EDGE_VENV_BIN } : {}) },
   }))
   // 形象包：插件自带的 avatars/cat（五个状态），加上 ~/.claude/minty/avatars/ 里用户自己的
   const packs: Record<string, { base: string; name: string; files: string[] }> = {
