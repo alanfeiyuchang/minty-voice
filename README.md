@@ -223,6 +223,7 @@ tools/make-avatar.sh     用你的视频做形象包（Windows：make-avatar.cmd
 .claude-plugin/          插件清单（plugin.json）和 marketplace（marketplace.json）
 hooks/register.tsx       全部逻辑；minty.test.tsx 是测试（claude plugin test .）
 avatars/cat/             自带的猫
+tts/minty-tts.py         合成语音（edge-tts 旧地址 2026-10 起 403，先走 Edge 现在用的新地址）
 ptt/                     快捷键监听：minty-ptt.swift（macOS，第一次用时编译）、
                          minty-ptt-linux.py（Linux，读 /dev/input）、minty-ptt.ps1（Windows，PowerShell）
 ~/.claude/minty/         你的设置（config.json）和你做的形象（avatars/）

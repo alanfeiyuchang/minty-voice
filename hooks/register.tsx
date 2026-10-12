@@ -297,12 +297,46 @@ async function modelPath($: Engine): Promise<string> {
 
 // edge-tts：`uv tool install edge-tts` / `pipx install edge-tts` 装在 ~/.local/bin；
 // 都没有但有 uv 时用 `uvx edge-tts` 临时跑
+// 合成用插件自带的 tts/minty-tts.py（参数和 edge-tts 命令一样）：2026-10 起 edge-tts 的旧地址一律 403，
+// 脚本先走 Edge 浏览器现在用的新地址，不行再试旧地址。它要用装了 edge_tts 的 Python 跑：
+// 优先 edge-tts 自己那个虚拟环境（uv tool / pipx 装的，edge-tts 命令是指过去的链接），其次 uv run 临时装一个；
+// 都没有就退回 edge-tts 命令本身
 async function findEdgeTts($: Engine): Promise<string[] | null> {
+  const pf = await platform($)
+  const script = join(pf, $.plugin.root, 'tts', 'minty-tts.py')
   const edge = await findBin($, ['edge-tts'])
+  const py = edge ? await edgePython($, edge) : null
+  if (py) return [py, script]
+  const uv = await findBin($, ['uv'])
+  if (uv) return [uv, 'run', '--quiet', '--with', 'edge-tts', 'python', script]
   if (edge) return [edge]
   const uvx = await findBin($, ['uvx'])
   return uvx ? [uvx, 'edge-tts'] : null
 }
+
+// edge-tts 那个虚拟环境里的 python：顺着 edge-tts 命令的链接找到它所在的 bin 目录
+async function edgePython($: Engine, edge: string): Promise<string | null> {
+  const pf = await platform($)
+  let real = edge
+  try {
+    real = (await $.fs.stat(edge, { resolve: true })).realPath ?? edge
+  } catch {}
+  const dir = real.slice(0, Math.max(real.lastIndexOf('/'), real.lastIndexOf('\\')))
+  const candidates =
+    pf.os === 'windows'
+      ? [
+          join(pf, dir, 'python.exe'),
+          join(pf, (await $.env.get('APPDATA')) ?? join(pf, pf.home, 'AppData', 'Roaming'), 'uv', 'data', 'tools', 'edge-tts', 'Scripts', 'python.exe'),
+          join(pf, pf.home, 'pipx', 'venvs', 'edge-tts', 'Scripts', 'python.exe'),
+        ]
+      : [`${dir}/python`, `${dir}/python3`]
+  for (const c of candidates) if (await $.fs.exists(c)) return c
+  return null
+}
+
+// 最近一次 edge 合成失败的原因；一个会话里只提示一次“退回系统声音了”
+let lastEdgeError = ''
+let edgeWarned = false
 
 // ---------- 录音 ----------
 
@@ -559,6 +593,12 @@ async function speak($: Engine, text: string) {
       const left = await speakEdge($, edge, chunks, gen)
       if (left === 0 || gen !== speechGen) return
       chunks = chunks.slice(-left) // 断网或合成失败：剩下的交给 say
+      if (!edgeWarned && lastEdgeError) {
+        edgeWarned = true
+        const msg = `自然声音（edge-tts）这次没合成出来，先用系统声音念。原因：${lastEdgeError}（/${opt.command} check 看详情）`
+        await update($, note, () => msg)
+        void $.ui.toast(msg)
+      }
     }
   }
   const rest = chunks.join('')
@@ -579,8 +619,15 @@ async function speakEdge($: Engine, edge: string[], chunks: string[], gen: numbe
         timeoutMs: 15_000,
       })
       .then(
-        r => (r.exitCode === 0 ? file : null),
-        () => null,
+        r => {
+          if (r.exitCode === 0) return file
+          lastEdgeError = (r.stderr.trim().split('\n').pop() ?? '').slice(0, 120)
+          return null
+        },
+        err => {
+          lastEdgeError = String(err).slice(0, 120)
+          return null
+        },
       )
   }
   const player = await playerFor($)
@@ -1306,7 +1353,11 @@ function shown(f: Field): string {
 // ---------- MINTY 面板：停在对话旁边的大猫 ----------
 
 const PANEL = 'minty'
-const PANEL_PET_PX = 180
+// 面板里的形象跟着面板大小走：宽度撑满面板（Svg 不给宽高，按图本身的宽度、最多到面板宽），
+// 高度按面板剩下的行数算。面板的尺寸只给“格”（代码字体的字宽、行高），一格的高宽比大约是这个数
+const CELL_ASPECT = 2.3
+// 文字一行占几格宽：中文算两格
+const textCells = (s: string) => [...s].reduce((n, c) => n + (/[\u2E80-\uFFFF]/.test(c) ? 2 : 1), 0)
 
 async function openPanel($: Engine) {
   try {
@@ -1450,7 +1501,8 @@ async function playVariant($: Engine) {
 }
 
 // 面板里画什么：选了形象包、而且找得到图就画它，否则画光球
-async function avatarSvg($: Engine, mood: OrbMood): Promise<string> {
+// aspect：画出来的高 ÷ 宽（≤ 1）。图在里面保持正方形、左右居中；markup 给得很宽，显示时缩到面板宽
+async function avatarSvg($: Engine, mood: OrbMood, aspect = 1): Promise<string> {
   if (opt.avatar !== 'orb') {
     if (!packsScanned) await scanPacks($)
     const pack = packs.find(p => p.id === opt.avatar)
@@ -1464,9 +1516,10 @@ async function avatarSvg($: Engine, mood: OrbMood): Promise<string> {
         shownAt = await $.clock.now()
       }
       const px = 320
+      const vw = Math.round(px / aspect)
       return (
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${px}" height="${px}" viewBox="0 0 ${px} ${px}" style="background:transparent">` +
-        `<image href="${uri}" width="${px}" height="${px}"/></svg>`
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${vw * 8}" height="${px * 8}" viewBox="0 0 ${vw} ${px}" style="background:transparent">` +
+        `<image href="${uri}" x="${(vw - px) / 2}" width="${px}" height="${px}"/></svg>`
       )
     }
   }
@@ -1507,6 +1560,21 @@ async function checkSetup($: Engine): Promise<string> {
   const hasModel = await $.fs.exists(model)
   const edge = await findEdgeTts($)
   const os = (await platform($)).os
+  // 真的合成一个字试试：edge-tts 装着不代表微软那边能用
+  let edgeOk: boolean | null = null
+  if (opt.ttsEngine === 'edge' && edge) {
+    const pf = await platform($)
+    const probe = join(pf, pf.tmp, `minty-tts-check-${await $.clock.now()}.mp3`)
+    try {
+      const r = await $.process.run([...edge, `--voice=${opt.edgeVoice}`, '--text=好', `--write-media=${probe}`], { timeoutMs: 20_000 })
+      edgeOk = r.exitCode === 0
+      if (!edgeOk) lastEdgeError = (r.stderr.trim().split('\n').pop() ?? '').slice(0, 120)
+    } catch (err) {
+      edgeOk = false
+      lastEdgeError = String(err).slice(0, 120)
+    }
+    void removeFile($, probe)
+  }
   const player = os === 'mac' ? true : !!(await playerFor($))
   const sysVoice = { mac: `macOS say，声音 ${opt.voice}`, linux: 'espeak-ng', windows: 'Windows 自带的朗读' }[os]
   return [
@@ -1515,7 +1583,9 @@ async function checkSetup($: Engine): Promise<string> {
     `${whisper ? '✓' : '✗'} whisper.cpp ${whisper ?? '— ' + installHint(os, 'whisper')}`,
     `${hasModel ? '✓' : '✗'} 模型 ${model}${hasModel ? '' : ' — 见 README 下载'}`,
     opt.ttsEngine === 'edge'
-      ? `${edge ? '✓' : '✗'} 朗读 edge-tts ${edge ? edge.join(' ') : `— uv tool install edge-tts（没装会退回${sysVoice}）`}，声音 ${opt.edgeVoice}，语速 ${opt.speechRate}`
+      ? edge
+        ? `${edgeOk ? '✓' : '✗'} 朗读 edge-tts ${edgeOk ? '能合成' : `合成失败（${lastEdgeError || '原因不明'}），会退回${sysVoice}`}，声音 ${opt.edgeVoice}，语速 ${opt.speechRate}`
+        : `✗ 朗读 edge-tts — uv tool install edge-tts（没装会退回${sysVoice}）`
       : `· 朗读 ${sysVoice}`,
     ...(opt.ttsEngine === 'edge' && !player ? [`✗ 放语音的程序（ffplay / mpv）— ${installHint(os, 'player')}；没装会退回${sysVoice}`] : []),
     `· 界面 ${opt.uiStyle === 'orb' ? '光球（终端在右下角，桌面在输入框右上方）' : '横栏'}`,
@@ -1648,13 +1718,26 @@ export const register: Register = (on, options) => {
     const heard = await read($, raw)
     const saying = mood === 'speak'
     const cols = Math.max(16, e.props.bodyColumns - 2)
+    const rows = Math.max(12, e.props.scroll.bodyRows)
+    // 形象下面的文字和按钮占几行：状态一行、听到的话和说的话按宽度折行、按钮一行、间距
+    const wrapRows = (s: string) => (s ? Math.ceil(textCells(s) / cols) : 0)
+    const shownHeard = p !== 'idle' && p !== 'recording' && heard !== '' && !saying ? '听到：' + heard : ''
+    const textRows = 4 + wrapRows(shownHeard) + wrapRows(line)
+    // 形象能占的高 ÷ 宽：面板瘦高时撑满宽度（正方形），矮宽时按剩下的高度来
+    const petAspect = Math.min(1, Math.max(0.3, ((rows - textRows - 2) * CELL_ASPECT) / cols))
+    const svg = 'Svg' in els ? await avatarSvg($, mood, petAspect) : ''
     const pet = catTaps ? (
       <els.Client key="orb" module="./orb.tsx" props={{ mood }} width={6} />
     ) : 'Svg' in els ? (
-      <els.Svg source={await avatarSvg($, mood)} alt={`${opt.name}：${label}`} width={PANEL_PET_PX} height={PANEL_PET_PX} />
+      svg.includes('<image') ? (
+        <els.Svg source={svg} alt={`${opt.name}：${label}`} />
+      ) : (
+        // 光球（没选形象包、或者包里没图）：光球的 SVG 是 100 × 100 的，按面板宽度给个尺寸
+        <els.Svg source={svg} alt={`${opt.name}：${label}`} width={180} height={180} />
+      )
     ) : null
     return (
-      <Box flexDirection="column" alignItems="center" width={cols}>
+      <Box flexDirection="column" alignItems="center" justifyContent="center" width={cols} minHeight={rows - 1}>
         {pet}
         {catTaps ? (
           <Text bold color={ORB_COLOR[mood].term}>

@@ -28,6 +28,8 @@ function emptyBand(on: On) {
 }
 
 const EDGE = '/Users/me/.local/bin/edge-tts'
+const EDGE_VENV_BIN = '/Users/me/.local/share/uv/tools/edge-tts/bin/edge-tts'
+const EDGE_PY = '/Users/me/.local/share/uv/tools/edge-tts/bin/python'
 // 这些测试测的是输入框上方的横栏（bar 界面）
 const bar = (options: Record<string, string | boolean> = {}) => ({ options: { uiStyle: 'bar', ...options } })
 const ACK = '收到，我先去修 React component。'
@@ -41,7 +43,7 @@ type Log = {
 const newLog = (): Log => ({ runs: [], spawns: [], models: [] })
 
 // 一台“假 Mac”：sox、whisper-cli、模型都在；whisper 吐出一段中英混说的原话
-function fakeMac(on: On, log: Log, mac: { edge?: 'ok' | 'offline' | 'missing'; holdSox?: boolean; ack?: string; play?: boolean; onPlay?: ($: EngineInterface) => Promise<void>; pttOwner?: string; heard?: string; refined?: string; config?: Record<string, string | boolean>; userPacks?: Record<string, { name: string; files: string[] }>; written?: string[]; decision?: Record<string, string>; weatherSay?: string } = {}) {
+function fakeMac(on: On, log: Log, mac: { edge?: 'ok' | 'offline' | 'missing'; holdSox?: boolean; ack?: string; play?: boolean; onPlay?: ($: EngineInterface) => Promise<void>; pttOwner?: string; heard?: string; refined?: string; config?: Record<string, string | boolean>; userPacks?: Record<string, { name: string; files: string[] }>; written?: string[]; decision?: Record<string, string>; weatherSay?: string; edgeVenv?: boolean } = {}) {
   const edge = mac.edge ?? 'ok'
   const kill = new Map<string, () => void>()
   // 按住快捷键说话：ptt/minty-ptt 每按下/松开一次往 stdout 打一行；emit 模拟按键
@@ -56,10 +58,13 @@ function fakeMac(on: On, log: Log, mac: { edge?: 'ok' | 'offline' | 'missing'; h
   mock.env(on, { HOME: '/Users/me' })
   mock.store(on)
   on('fs.exists', async ($, e) => ({
-    value: norm(e.path).endsWith(PTT_BIN) || packFile(e.path) !== undefined || [SOX, WHISPER, MODEL, ...(edge === 'missing' ? [] : [EDGE]), ...(mac.play ? ['/opt/homebrew/bin/play'] : [])].some(x => norm(e.path).endsWith(x)) || norm(e.path).endsWith('.wav'),
+    value: norm(e.path).endsWith(PTT_BIN) || packFile(e.path) !== undefined || (mac.edgeVenv && norm(e.path) === EDGE_PY) || [SOX, WHISPER, MODEL, ...(edge === 'missing' ? [] : [EDGE]), ...(mac.play ? ['/opt/homebrew/bin/play'] : [])].some(x => norm(e.path).endsWith(x)) || norm(e.path).endsWith('.wav'),
   }))
   // 录好的那一段有内容
-  on('fs.stat', async () => ({ value: { kind: 'file' as const, size: 96_000, mtimeMs: 0, isLink: false } }))
+  // edgeVenv：edge-tts 是 uv tool 装的，命令是指向它虚拟环境的链接
+  on('fs.stat', async ($, e) => ({
+    value: { kind: 'file' as const, size: 96_000, mtimeMs: 0, isLink: false, ...(mac.edgeVenv && norm(e.path) === EDGE ? { realPath: EDGE_VENV_BIN } : {}) },
+  }))
   // 形象包：插件自带的 avatars/cat（五个状态），加上 ~/.claude/minty/avatars/ 里用户自己的
   const packs: Record<string, { base: string; name: string; files: string[] }> = {
     cat: { base: '/avatars', name: '猫', files: ['idle.avif', 'listen.avif', 'think.avif', 'wait.avif', 'speak.avif', 'idle-yawn.avif', 'idle-groom.avif'] },
@@ -110,8 +115,10 @@ function fakeMac(on: On, log: Log, mac: { edge?: 'ok' | 'offline' | 'missing'; h
     if (e.argv[0] === '/usr/bin/pkill') kill.get(e.argv[3]!)?.()
     // whisper 的老毛病：中英之间不留空格、中文后面跟半角逗号
     const stdout = e.argv[0] === WHISPER ? (mac.heard ?? '那个瑞爱克特的component有bug,帮我fix一下然后跑一下test') + '\n' : ''
-    const exitCode = e.argv[0] === EDGE && edge === 'offline' ? 1 : 0
-    return { value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    const isEdge = e.argv[0] === EDGE || String(e.argv[1] ?? '').endsWith('minty-tts.py')
+    const exitCode = isEdge && edge === 'offline' ? 1 : 0
+    const stderr = isEdge && edge === 'offline' ? 'WSServerHandshakeError: 403, message=Invalid response status\n' : ''
+    return { value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('turn.complete', async ($, e) => ({ text: e.answer }))
   // 录音进程立刻结束 = 录满自动停（走完整条流水线）
@@ -484,10 +491,13 @@ test('MINTY 面板：大猫、整段回答、按钮都在面板里；面板开�
   expect(await band.find({ type: 'Svg' })).toBeUndefined()
   await band.unmount()
 
+  // 形象跟着面板大小走：不给固定宽高（撑满面板宽）；瘦高的面板里是正方形
   const panel = await $.ui.mount({ plugin: 'minty', surface: 'desktop', ...PANEL })
   const pet = await panel.find({ type: 'Svg' })
-  expect((pet?.props as { width?: number } | undefined)?.width).toBe(180)
-  expect(String((pet?.props as { source?: string } | undefined)?.source)).toContain('data:image/avif;base64,')
+  expect((pet?.props as { width?: number } | undefined)?.width).toBeUndefined()
+  const square = String((pet?.props as { source?: string } | undefined)?.source)
+  expect(square).toContain('data:image/avif;base64,')
+  expect(square).toContain('viewBox="0 0 320 320"')
   // 没有麦克风和对话模式按钮；猫正下方那行字就是点击区：点一下开始说，再点一下说完
   expect(await panel.find({ type: 'Button', text: /🎙|对话/ })).toBeUndefined()
   expect(await panel.find({ key: 'panel-talk', text: /点我说话/ })).toBeDefined()
@@ -977,4 +987,43 @@ test('Linux：录 wav、pkill 收尾、ffplay 放语音；快捷键是 python3 �
   expect(String(rec.argv[9]).startsWith('/tmp/minty-') && String(rec.argv[9]).endsWith('.wav')).toBe(true)
   expect(log.runs.some(a => a[0] === '/usr/bin/pkill' && a[1] === '-INT')).toBe(true)
   await until(() => log.spawns.some(s => s.argv[0] === LNX.ffplay))
+})
+
+test('MINTY 面板：矮宽的面板里，形象按剩下的高度缩小，猫保持正方形、左右居中', async ($, on) => {
+  const log = newLog()
+  fakeMac(on, log)
+  const wide = await $.ui.mount({ plugin: 'minty', surface: 'desktop', ...PANEL, props: { ...PANEL.props, bodyColumns: 80, scroll: { ...PANEL.props.scroll, bodyRows: 14 } } })
+  const src = String(((await wide.find({ type: 'Svg' }))?.props as { source?: string }).source)
+  const vw = Number(/viewBox="0 0 (\d+) 320"/.exec(src)?.[1])
+  expect(vw).toBeGreaterThan(600)
+  expect(src).toContain(`x="${(vw - 320) / 2}"`)
+  await wide.unmount()
+})
+
+test('edge-tts 用它自己虚拟环境里的 Python 跑插件的 minty-tts.py（绕开旧地址的 403）', bar(), async ($, on) => {
+  const log = newLog()
+  fakeMac(on, log, { edgeVenv: true })
+  on('prompt.submit', async ($, e) => ({ text: e.text }))
+  const ui = await talkThenAnswer($, 'terminal')
+  const runs = log.runs.filter(a => a[0] === EDGE_PY)
+  expect(runs.length).toBe(2)
+  expect(String(runs[0]![1]).endsWith('/tts/minty-tts.py')).toBe(true)
+  expect(runs[0]).toContain('--voice=zh-CN-XiaoxiaoNeural')
+  expect(log.runs.some(a => a[0] === EDGE)).toBe(false)
+  await ui.unmount()
+})
+
+test('自然声音合成失败、退回系统声音时，提示一次原因', bar(), async ($, on) => {
+  const log = newLog()
+  fakeMac(on, log, { edge: 'offline' })
+  on('prompt.submit', async ($, e) => ({ text: e.text }))
+  const toasts: string[] = []
+  on('ui.toast', async ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const ui = await talkThenAnswer($, 'terminal')
+  expect(toasts.filter(t => t.includes('系统声音')).length).toBe(1)
+  expect(toasts[0]).toContain('403')
+  await ui.unmount()
 })
