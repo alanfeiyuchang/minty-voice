@@ -36,13 +36,7 @@ STATES = {
     'tilts its head left then back, waiting for an answer.',
     'speak': 'The cat sits facing the viewer and meows repeatedly as if talking, mouth opening and closing '
     'clearly, head bobbing slightly with each meow. Friendly and chatty.',
-    # 待命的变化：开头和结尾都是和 idle 一样的坐姿（正对镜头坐着），中间做一件小事，播完接回 idle 不跳
-    'idle-groom': 'The cat starts sitting upright facing the viewer, calm. It lifts one front paw, licks it twice '
-    'and wipes it over its face once, then puts the paw down and ends sitting upright facing the viewer exactly as it started.',
-    'idle-yawn': 'The cat starts sitting upright facing the viewer, sleepy. It opens its mouth in one big slow yawn, '
-    'eyes squeezed shut, then closes its mouth, blinks, and ends sitting upright facing the viewer exactly as it started.',
-    'idle-look': 'The cat starts sitting upright facing the viewer. It turns its head to look at something to the left, '
-    'ears swivel, then looks to the right, then turns back and ends sitting upright facing the viewer exactly as it started.',
+    # 待命的变化（idle-*）改用 gen_idle_variants.py：首尾帧都锁成 idle 的第一帧，换片段时接得上
     'live': 'The cat sits upright and alert facing the viewer, ears twitch, eyes bright, tail curled around '
     'its paws, small happy head movements. Engaged and lively.',
 }

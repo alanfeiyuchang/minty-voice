@@ -1396,9 +1396,15 @@ async function packImage($: Engine, pack: Pack, mood: string): Promise<string | 
 }
 
 // 待命的变化：平时放 idle，每放完 2~4 遍随机插播一段变化，变化放完一遍接回 idle。
-// 只在真的待命时插（不在听、不在想、不在说）；换图时动画从第一帧开始放，idle 的第一帧和变化的首尾是同一个姿势，接得上
+// 只在真的待命时插（不在听、不在想、不在说）。换图时动画从第一帧开始放；变化片段从 idle 的第一帧出发、回到它结束，
+// 所以只在 idle 正好放回第一帧的那一刻换上去（按它开始放的时间算），放完一遍（pack.json 里的时长）再换回来
 let idleTimer: { cancel: () => void } | null = null
 let lastVariant = ''
+// 面板上现在画的是哪段动画、从什么时候开始放的（画面换了图就从头放）
+let shownKey = ''
+let shownAt = 0
+// 离 idle 放回第一帧还差多少毫秒以内就算“正好”
+const LOOP_SLACK_MS = 120
 
 function currentPack(): Pack | undefined {
   return opt.avatar === 'orb' ? undefined : packs.find(p => p.id === opt.avatar)
@@ -1422,6 +1428,15 @@ async function playVariant($: Engine) {
   if (!pack || pack.variants.length === 0) return
   const { mood } = await orbLook($, '')
   if (mood === 'idle' && (await read($, panelOpen))) {
+    // 等 idle 放回第一帧再换：画面上的 idle 是 shownAt 开始放的
+    const loop = (pack.durations.idle ?? 6) * 1000
+    if (shownKey === `${pack.dir}/idle`) {
+      const phase = ((await $.clock.now()) - shownAt) % loop
+      if (phase > LOOP_SLACK_MS && loop - phase > LOOP_SLACK_MS) {
+        idleTimer = $.clock.after(loop - phase, () => void playVariant($))
+        return
+      }
+    }
     const choices = pack.variants.length > 1 ? pack.variants.filter(v => v !== lastVariant) : pack.variants
     const v = choices[Math.floor(Math.random() * choices.length)]!
     lastVariant = v
@@ -1440,8 +1455,14 @@ async function avatarSvg($: Engine, mood: OrbMood): Promise<string> {
     if (!packsScanned) await scanPacks($)
     const pack = packs.find(p => p.id === opt.avatar)
     const variant = mood === 'idle' ? await read($, idleVariant) : ''
-    const uri = pack ? await packImage($, pack, variant && pack.variants.includes(variant) ? variant : mood) : null
+    const clip = variant && pack?.variants.includes(variant) ? variant : mood
+    const uri = pack ? await packImage($, pack, clip) : null
     if (uri) {
+      const key = `${pack!.dir}/${uri === (await packImage($, pack!, 'idle')) && clip !== 'idle' && !clip.startsWith('idle-') ? 'idle' : clip}`
+      if (key !== shownKey) {
+        shownKey = key
+        shownAt = await $.clock.now()
+      }
       const px = 320
       return (
         `<svg xmlns="http://www.w3.org/2000/svg" width="${px}" height="${px}" viewBox="0 0 ${px} ${px}" style="background:transparent">` +

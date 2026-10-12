@@ -2,13 +2,15 @@
   "name": "猫",
   "version": 1,
   "durations": {
-    "idle": 5.75,
-    "listen": 5.75,
-    "think": 5.75,
-    "wait": 5.75,
-    "speak": 5.75,
-    "idle-groom": 3.0,
-    "idle-look": 3.0,
-    "idle-yawn": 3.0
+    "idle": 6.0,
+    "listen": 6.0,
+    "think": 6.0,
+    "wait": 6.0,
+    "speak": 6.0,
+    "idle-groom": 3.125,
+    "idle-look": 3.125,
+    "idle-nod": 3.125,
+    "idle-tail": 3.125,
+    "idle-yawn": 3.125
   }
 }

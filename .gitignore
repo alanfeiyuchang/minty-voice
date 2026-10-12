@@ -19,3 +19,4 @@ stt-test-audio/
 .DS_Store
 node_modules/
 __pycache__/
+pet/idle-preview.mp4

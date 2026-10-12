@@ -799,13 +799,17 @@ test('待命动画有变化：放几遍 idle 后插播一段变化，放完一�
   const src = async () => String((await panel.find({ type: 'Svg' }))?.props.source)
   const isVariant = (x: string) => x.includes('WWFXTg==') || x.includes('R1JPTw==')
   expect(isVariant(await src())).toBe(false)
-  // idle 一遍 6 秒，每放 2~4 遍插播一段；一秒一秒往前走，看到变化出现、3 秒左右又换回 idle
-  let shownAt = -1
-  for (let t = 0; t < 30 && shownAt < 0; t++) {
-    await clock.advance(1000)
-    if (isVariant(await src())) shownAt = t
+  // idle 一遍 6 秒，每放 2~4 遍插播一段，而且正好在 idle 放回第一帧的时候换（面板画出来的那一刻算第 0 秒）；
+  // 0.25 秒一步往前走，看到变化出现的时刻离整遍不超过一步；3 秒后又换回 idle
+  const shownAt = clock.now()
+  let seenAt = -1
+  for (let t = 0; t < 30_000 && seenAt < 0; t += 250) {
+    await clock.advance(250)
+    if (isVariant(await src())) seenAt = clock.now()
   }
-  expect(shownAt).toBeGreaterThanOrEqual(11)
+  expect(seenAt).toBeGreaterThan(shownAt + 11_000)
+  const phase = (seenAt - shownAt) % 6000
+  expect(phase <= 250 || phase >= 5750).toBe(true)
   await clock.advance(3_100)
   expect(isVariant(await src())).toBe(false)
   // 在听的时候：到点了也不插

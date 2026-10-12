@@ -20,6 +20,9 @@
 2. 在一台有 GPU 的机器上用本地 ComfyUI（`~/ComfyUI`，端口 8188）的 MiniMax H3 reference-to-video 生成：`python3 pet/gen_pet.py <状态> --full`
    （参考图先上传成 ComfyUI input 里的 `minty_ref{1,2,3}.jpg`；20 步约 55 秒一个状态，纯色蓝幕、3 秒）
 3. 把 `~/ComfyUI/output/minty_pet/<状态>_full_*.png` 拷到 `pet/frames/<状态>/`
-4. `./tools/make-avatar.sh pet/frames --name 猫 --id cat --out avatars`
+4. 待命的变化：把 `pet/frames/idle` 的第一帧（带蓝幕原样）传成 ComfyUI input 里的 `minty_anchor.png`，
+   `python3 pet/gen_idle_variants.py`（MiniMax H3 first-last-frame，首尾帧都是它，8 步 turbo 约 30 秒一段），
+   把 `~/ComfyUI/output/minty_pet/idle-*_fl_*.png` 拷到 `pet/frames/idle-*/`
+5. `./tools/make-avatar.sh pet/frames --name 猫 --id cat --out avatars`
 
 `pet/make_sprites.py` 是 make-avatar 的前身，留着做参考。

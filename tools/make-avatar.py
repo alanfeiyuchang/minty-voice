@@ -80,7 +80,17 @@ def layout(states: dict[str, list[Image.Image]]) -> dict:
         h = y1 - y0
         band = slice(y0 + int(0.25 * h), y0 + int(0.65 * h))
         cx = float(np.median([np.where(m[band])[1].mean() for m in masks if m[band].any()]))
-        info[name] = {'cx': cx, 'h': h, 'bottom': y1, 'half': max(cx - x0, x1 - cx)}
+        info[name] = {'cx': cx, 'h': h, 'bottom': y1, 'half': max(cx - x0, x1 - cx), 'x0': x0, 'x1': x1, 'mask0': masks[0]}
+    # 待命的变化片段如果就是从 idle 的第一帧生成的（第一帧和 idle 第一帧几乎重合），就整段照搬 idle 的缩放和位置：
+    # 同一个机位、同一只猫，再各自按外框算一遍反而会让猫在切换时忽大忽小
+    if 'idle' in info:
+        base = info['idle']
+        for name in [n for n in info if n.startswith('idle-')]:
+            v = info[name]
+            inter = np.logical_and(v['mask0'], base['mask0']).sum()
+            union = np.logical_or(v['mask0'], base['mask0']).sum()
+            if union and inter / union > 0.85:
+                info[name] = {**base, 'half': max(base['half'], base['cx'] - v['x0'], v['x1'] - base['cx']), 'shared': True}
     # 统一的缩小系数：让每个状态最远的那一边（多半是尾巴）都留在画面 2% 的边距以内
     k = min(1.0, *(0.48 / (CAT_HEIGHT * v['half'] / v['h']) for v in info.values()))
     return {'info': info, 'k': k}
@@ -96,6 +106,25 @@ def normalized(frames: list[Image.Image], px: int, lay: dict, name: str) -> list
         canvas = Image.new('RGBA', (px, px))
         canvas.paste(big, (round(px / 2 - v['cx'] * s), round(FEET * px - v['bottom'] * s)), big)
         out.append(canvas)
+    return out
+
+
+def bridge(frames: list[Image.Image], anchor: Image.Image, k: int) -> list[Image.Image]:
+    """首尾各 k 帧按比例混向 anchor（预乘 alpha 混合，边缘不发黑）；第一帧和最后一帧几乎就是 anchor。"""
+    if len(frames) <= 2 * k:
+        return frames
+    a = np.asarray(anchor.convert('RGBA')).astype(np.float32) / 255
+    a = np.dstack([a[..., :3] * a[..., 3:], a[..., 3:]])
+    out = list(frames)
+    for i in range(k):
+        t = (k - i) / (k + 1)  # 越靠两头越像 anchor
+        for j in (i, len(frames) - 1 - i):
+            f = np.asarray(frames[j].convert('RGBA')).astype(np.float32) / 255
+            f = np.dstack([f[..., :3] * f[..., 3:], f[..., 3:]])
+            m = f * (1 - t) + a * t
+            al = m[..., 3:]
+            rgb = np.where(al > 1e-4, m[..., :3] / np.maximum(al, 1e-4), 0)
+            out[j] = Image.fromarray((np.dstack([np.clip(rgb, 0, 1), al]) * 255).astype(np.uint8), 'RGBA')
     return out
 
 
@@ -201,7 +230,7 @@ def main():
         sys.exit('这个 Pillow 不支持 AVIF：要 Pillow 11.3 或更新（用 tools/make-avatar.sh / .cmd 运行会自动装对的版本）')
     name = a.name or a.src.resolve().name
     pack_id = a.id or slug(a.name if a.name and slug(a.name) != 'avatar' else a.src.resolve().name)
-    max_frames = max(2, round(a.seconds * a.fps))
+    max_frames = max(2, round(a.seconds * a.fps) + 1)  # 3 秒 × 8 fps 采样出来是 25 帧（含最后回到起点那一帧）
 
     states: dict[str, list[Image.Image]] = {}
     # 待命的变化：idle-<随便什么>.mp4 或 idle-<随便什么>/ 文件夹
@@ -235,7 +264,15 @@ def main():
     durations = {}
     for st, frames in states.items():
         seq = pingpong(frames) if a.loop == 'pingpong' and not st.startswith('idle-') else frames
-        render = (lambda fr, px: fit_whole(fr, px)) if lay is None else (lambda fr, px, st=st: normalized(fr, px, lay, st))
+        if lay is None:
+            render = lambda fr, px: fit_whole(fr, px)
+        else:
+            render = lambda fr, px, st=st: normalized(fr, px, lay, st)
+        if st.startswith('idle-') and 'idle' in states:
+            # 变化片段两头各 2 帧渐渐过渡到 idle 的第一帧：插件在 idle 放回第一帧时换上它、放完换回去，两头都接得上
+            anchor_frames = states['idle'][:1]
+            inner = render
+            render = lambda fr, px, inner=inner, anchor_frames=anchor_frames: bridge(inner(fr, px), (fit_whole(anchor_frames, px) if lay is None else normalized(anchor_frames, px, lay, 'idle'))[0], 2)
         data, how = encode_fitting(seq, render, a.fps)
         durations[st] = round(len(seq) / a.fps, 3)
         (dst / f'{st}.avif').write_bytes(data)
